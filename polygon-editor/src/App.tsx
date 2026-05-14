@@ -5,7 +5,6 @@ type Point = [number, number];
 
 const GRID_SIZE = 1;
 const GRID_MAJOR = 10;
-const CANVAS_SIZE = 600;
 const INITIAL_SCALE = 4; // pixels per unit
 const MAX_HISTORY = 50;
 const STORAGE_KEY = 'polygon-editor-history';
@@ -166,7 +165,8 @@ function App() {
   }, [history]);
 
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
-  const [offset, setOffset] = useState<[number, number]>([CANVAS_SIZE / 4, (CANVAS_SIZE * 3) / 4]);
+  const [canvasSize, setCanvasSize] = useState<[number, number]>([800, 800]);
+  const [offset, setOffset] = useState<[number, number]>([200, 600]);
   const [scale, setScale] = useState(INITIAL_SCALE);
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState<[number, number]>([0, 0]);
@@ -177,6 +177,23 @@ function App() {
   const [dragPreview, setDragPreview] = useState<Point | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Resize canvas to fill container
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        if (width > 0 && height > 0) {
+          setCanvasSize([Math.floor(width), Math.floor(height)]);
+        }
+      }
+    });
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, []);
 
   const toCanvas = useCallback(
     (wx: number, wy: number): [number, number] => [
@@ -603,11 +620,11 @@ function App() {
     <div className="app">
       <h1>OpenSCAD Polygon Editor</h1>
       <div className="main-layout">
-        <div className="canvas-container">
+        <div className="canvas-container" ref={containerRef}>
           <canvas
             ref={canvasRef}
-            width={CANVAS_SIZE}
-            height={CANVAS_SIZE}
+            width={canvasSize[0]}
+            height={canvasSize[1]}
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
