@@ -18,6 +18,29 @@ const STORAGE_POS_KEY = 'polygon-editor-history-pos-v2';
 const POINT_HIT_RADIUS = 10;
 const EDGE_HIT_RADIUS = 8;
 
+type EditMode = 'normal' | 'distance';
+
+/** Signed distance from point P to the infinite line through A→B.
+ *  Positive = left side of A→B, negative = right side. */
+function signedDistToLine(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len = Math.hypot(dx, dy);
+  if (len === 0) return Math.hypot(px - ax, py - ay);
+  // cross product (B-A) × (P-A) / |B-A|
+  return (dx * (py - ay) - dy * (px - ax)) / len;
+}
+
+/** Project point P onto the infinite line through A→B, return the closest point on the line. */
+function projectOntoLine(px: number, py: number, ax: number, ay: number, bx: number, by: number): [number, number] {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return [ax, ay];
+  const t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+  return [ax + t * dx, ay + t * dy];
+}
+
 const PATH_COLORS = [
   { fill: [200, 180, 50], stroke: '#c8b432', label: 'Outer' },
   { fill: [255, 80, 80],  stroke: '#ff5050', label: 'Hole' },
@@ -132,6 +155,13 @@ function App() {
   // Selected point index (global index into points[])
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
 
+  // Editing mode
+  const [editMode, setEditMode] = useState<EditMode>('normal');
+  // Distance mode state: selected point, selected edge (as [pathIdx, edgeIdx])
+  const [distPoint, setDistPoint] = useState<number | null>(null);
+  const [distEdge, setDistEdge] = useState<[number, number] | null>(null); // [pathIdx, positionInPath]
+  const [distValue, setDistValue] = useState<string>('');
+
   const pushState = useCallback((next: PolyState) => {
     setHistory((prev) => {
       const trimmed = prev.slice(0, historyPos + 1);
@@ -232,6 +262,52 @@ function App() {
   // Active path's global indices
   const activePathIndices = paths[activePath] || [];
 
+  // Compute current distance for distance mode
+  const distInfo = (() => {
+    if (distPoint === null || distEdge === null) return null;
+    const [pi, ei] = distEdge;
+    const path = paths[pi];
+    if (!path || ei >= path.length) return null;
+    const gi1 = path[ei];
+    const gi2 = path[(ei + 1) % path.length];
+    const a = points[gi1];
+    const b = points[gi2];
+    const p = points[distPoint];
+    if (!a || !b || !p) return null;
+    const dist = signedDistToLine(p[0], p[1], a[0], a[1], b[0], b[1]);
+    return { a, b, p, dist, gi1, gi2 };
+  })();
+
+  // When distPoint/distEdge change, update the input value
+  useEffect(() => {
+    if (distInfo) {
+      setDistValue(String(Math.round(Math.abs(distInfo.dist) * 1000) / 1000));
+    }
+  }, [distPoint, distEdge]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const applyDistance = useCallback(() => {
+    if (distPoint === null || distEdge === null || !distInfo) return;
+    const newDist = parseFloat(distValue);
+    if (isNaN(newDist) || newDist < 0) return;
+    const { a, b, p } = distInfo;
+    // Project point onto the line, then offset by newDist in the same direction
+    const [projX, projY] = projectOntoLine(p[0], p[1], a[0], a[1], b[0], b[1]);
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const len = Math.hypot(dx, dy);
+    if (len === 0) return;
+    // Normal pointing left of A→B
+    const nx = -dy / len;
+    const ny = dx / len;
+    // Preserve the side: if current signed dist is negative, place on negative side
+    const sign = distInfo.dist >= 0 ? 1 : -1;
+    const wx = Math.round((projX + nx * newDist * sign) / GRID_SIZE) * GRID_SIZE;
+    const wy = Math.round((projY + ny * newDist * sign) / GRID_SIZE) * GRID_SIZE;
+    const newPoints = [...points];
+    newPoints[distPoint] = [wx, wy];
+    pushState({ points: newPoints, paths });
+  }, [distPoint, distEdge, distInfo, distValue, points, paths, pushState]);
+
   // Hit test: find global point index under cursor (across all paths)
   const hitTestPoint = useCallback((cx: number, cy: number): number | null => {
     // Prefer active path points
@@ -269,6 +345,27 @@ function App() {
     }
     return bestIdx;
   }, [points, activePathIndices, toCanvas]);
+
+  // Hit test edge on ANY path; returns [pathIdx, positionInPath] or null
+  const hitTestEdgeAny = useCallback((cx: number, cy: number): [number, number] | null => {
+    let bestDist = Infinity;
+    let bestResult: [number, number] | null = null;
+    for (let pi = 0; pi < paths.length; pi++) {
+      const path = paths[pi];
+      if (path.length < 2) continue;
+      for (let i = 0; i < path.length; i++) {
+        const j = (i + 1) % path.length;
+        const [ax, ay] = toCanvas(points[path[i]][0], points[path[i]][1]);
+        const [bx, by] = toCanvas(points[path[j]][0], points[path[j]][1]);
+        const d = distToSegment(cx, cy, ax, ay, bx, by);
+        if (d < EDGE_HIT_RADIUS && d < bestDist) {
+          bestDist = d;
+          bestResult = [pi, i];
+        }
+      }
+    }
+    return bestResult;
+  }, [points, paths, toCanvas]);
 
   // --- Drawing ---
   const draw = useCallback(() => {
@@ -460,7 +557,67 @@ function App() {
     // Origin label
     ctx.fillStyle = '#aaa'; ctx.font = '10px monospace';
     ctx.fillText('0', offset[0] + 4, offset[1] + 13);
-  }, [getPathPoints, points, paths, selectedIndex, activePath, dragIndex, dragPreview, offset, scale, toCanvas, canvasSize, bgImage, imageOpacity, polyOpacity]);
+
+    // Distance mode visual feedback
+    if (editMode === 'distance') {
+      // Highlight selected point
+      if (distPoint !== null && points[distPoint]) {
+        const [px, py] = toCanvas(points[distPoint][0], points[distPoint][1]);
+        ctx.beginPath();
+        ctx.arc(px, py, 12, 0, Math.PI * 2);
+        ctx.strokeStyle = '#00ffcc';
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([4, 3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      // Highlight selected edge
+      if (distEdge !== null) {
+        const [pi, ei] = distEdge;
+        const path = paths[pi];
+        if (path) {
+          const gi1 = path[ei];
+          const gi2 = path[(ei + 1) % path.length];
+          const a = points[gi1];
+          const b = points[gi2];
+          if (a && b) {
+            const [ax, ay] = toCanvas(a[0], a[1]);
+            const [bx, by] = toCanvas(b[0], b[1]);
+            ctx.beginPath();
+            ctx.moveTo(ax, ay);
+            ctx.lineTo(bx, by);
+            ctx.strokeStyle = '#00ffcc';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+            // Draw the perpendicular line from point to the infinite line
+            if (distPoint !== null && points[distPoint]) {
+              const p = points[distPoint];
+              const [projX, projY] = projectOntoLine(p[0], p[1], a[0], a[1], b[0], b[1]);
+              const [cpx, cpy] = toCanvas(p[0], p[1]);
+              const [cProjX, cProjY] = toCanvas(projX, projY);
+              ctx.beginPath();
+              ctx.moveTo(cpx, cpy);
+              ctx.lineTo(cProjX, cProjY);
+              ctx.strokeStyle = '#ffcc00';
+              ctx.lineWidth = 1.5;
+              ctx.setLineDash([3, 3]);
+              ctx.stroke();
+              ctx.setLineDash([]);
+
+              // Small right-angle indicator
+              const dist = Math.abs(signedDistToLine(p[0], p[1], a[0], a[1], b[0], b[1]));
+              const midX = (cpx + cProjX) / 2;
+              const midY = (cpy + cProjY) / 2;
+              ctx.fillStyle = '#ffcc00';
+              ctx.font = 'bold 12px monospace';
+              ctx.fillText(String(Math.round(dist * 100) / 100), midX + 6, midY - 6);
+            }
+          }
+        }
+      }
+    }
+  }, [getPathPoints, points, paths, selectedIndex, activePath, dragIndex, dragPreview, offset, scale, toCanvas, canvasSize, bgImage, imageOpacity, polyOpacity, editMode, distPoint, distEdge]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -484,11 +641,11 @@ function App() {
     }
     if (e.button !== 0) return;
 
-    if (e.shiftKey) {
+    // Pan with shift+click on empty space (shared across modes)
+    if (e.shiftKey && editMode === 'normal') {
       const hitPt = hitTestPoint(cx, cy);
       if (hitPt !== null) {
         setDragIndex(hitPt); setDragPreview(points[hitPt]); setSelectedIndex(hitPt);
-        // Switch to the path that owns this point
         for (let pi = 0; pi < paths.length; pi++) {
           if (paths[pi].includes(hitPt)) { setActivePath(pi); break; }
         }
@@ -497,7 +654,66 @@ function App() {
       setIsPanning(true); setPanStart([e.clientX, e.clientY]); setOffsetStart([...offset]); e.preventDefault(); return;
     }
 
-    // Click on edge of active path: insert point
+    if (e.shiftKey && editMode === 'distance') {
+      setIsPanning(true); setPanStart([e.clientX, e.clientY]); setOffsetStart([...offset]); e.preventDefault(); return;
+    }
+
+    // Distance mode clicks
+    if (editMode === 'distance') {
+      // Step 1: select a point
+      if (distPoint === null) {
+        const hitPt = hitTestPoint(cx, cy);
+        if (hitPt !== null) {
+          setDistPoint(hitPt);
+          setDistEdge(null);
+        }
+        return;
+      }
+      // Step 2: select an edge
+      if (distEdge === null) {
+        // Allow clicking a different point to re-select
+        const hitPt = hitTestPoint(cx, cy);
+        if (hitPt !== null) {
+          // If clicking the same point, deselect
+          if (hitPt === distPoint) { setDistPoint(null); return; }
+          setDistPoint(hitPt);
+          return;
+        }
+        const hitEdgeResult = hitTestEdgeAny(cx, cy);
+        if (hitEdgeResult !== null) {
+          // Don't allow selecting an edge that contains the selected point
+          const [pi, ei] = hitEdgeResult;
+          const path = paths[pi];
+          const gi1 = path[ei];
+          const gi2 = path[(ei + 1) % path.length];
+          if (gi1 !== distPoint && gi2 !== distPoint) {
+            setDistEdge(hitEdgeResult);
+          }
+        }
+        return;
+      }
+      // Step 3: already have both, clicking resets
+      const hitPt = hitTestPoint(cx, cy);
+      if (hitPt !== null) {
+        setDistPoint(hitPt);
+        setDistEdge(null);
+        return;
+      }
+      const hitEdgeResult = hitTestEdgeAny(cx, cy);
+      if (hitEdgeResult !== null) {
+        const [pi, ei] = hitEdgeResult;
+        const path = paths[pi];
+        const gi1 = path[ei];
+        const gi2 = path[(ei + 1) % path.length];
+        if (gi1 !== distPoint && gi2 !== distPoint) {
+          setDistEdge(hitEdgeResult);
+        }
+        return;
+      }
+      return;
+    }
+
+    // Normal mode: click on edge of active path to insert point
     const hitEdge = hitTestEdge(cx, cy);
     if (hitEdge !== null) {
       const [wx, wy] = toWorld(cx, cy);
@@ -539,10 +755,16 @@ function App() {
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
     const canvas = canvasRef.current!;
-    if (e.shiftKey && hitTestPoint(cx, cy) !== null) canvas.style.cursor = 'grab';
-    else if (hitTestPoint(cx, cy) !== null) canvas.style.cursor = 'pointer';
-    else if (hitTestEdge(cx, cy) !== null) canvas.style.cursor = 'copy';
-    else canvas.style.cursor = 'default';
+    if (editMode === 'distance') {
+      if (hitTestPoint(cx, cy) !== null) canvas.style.cursor = 'pointer';
+      else if (distPoint !== null && hitTestEdgeAny(cx, cy) !== null) canvas.style.cursor = 'crosshair';
+      else canvas.style.cursor = 'default';
+    } else {
+      if (e.shiftKey && hitTestPoint(cx, cy) !== null) canvas.style.cursor = 'grab';
+      else if (hitTestPoint(cx, cy) !== null) canvas.style.cursor = 'pointer';
+      else if (hitTestEdge(cx, cy) !== null) canvas.style.cursor = 'copy';
+      else canvas.style.cursor = 'default';
+    }
   };
 
   const handleMouseUp = () => {
@@ -678,7 +900,13 @@ function App() {
             onWheel={handleWheel}
           />
           <div className="canvas-hint">
-            Click edge to insert point | Shift+drag point to move | Middle-mouse/Shift+click to pan | Scroll to zoom
+            {editMode === 'normal'
+              ? 'Click edge to insert point | Shift+drag point to move | Middle-mouse/Shift+click to pan | Scroll to zoom'
+              : distPoint === null
+                ? 'Click a point to select it | Middle-mouse to pan | Scroll to zoom'
+                : distEdge === null
+                  ? 'Click an edge to measure distance | Click another point to re-select'
+                  : 'Enter distance and press Apply or Enter | Click to re-select'}
           </div>
         </div>
         <div className="sidebar">
@@ -708,6 +936,54 @@ function App() {
                 onChange={(e) => setPolyOpacity(Number(e.target.value) / 100)} />
             </label>
           </div>
+
+          <h2>Mode</h2>
+          <div className="mode-toolbar">
+            <button
+              className={`mode-btn ${editMode === 'normal' ? 'active' : ''}`}
+              onClick={() => { setEditMode('normal'); setDistPoint(null); setDistEdge(null); }}
+              title="Normal editing mode"
+            >Edit</button>
+            <button
+              className={`mode-btn ${editMode === 'distance' ? 'active' : ''}`}
+              onClick={() => { setEditMode('distance'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); }}
+              title="Set point distance from a line"
+            >Distance</button>
+          </div>
+
+          {editMode === 'distance' && (
+            <div className="distance-panel">
+              <div className="distance-steps">
+                <div className={`distance-step ${distPoint === null ? 'current' : 'done'}`}>
+                  1. Click a point {distPoint !== null && <span className="step-done">— pt {distPoint}</span>}
+                </div>
+                <div className={`distance-step ${distPoint !== null && distEdge === null ? 'current' : distEdge !== null ? 'done' : ''}`}>
+                  2. Click an edge {distEdge !== null && <span className="step-done">— edge {paths[distEdge[0]][distEdge[1]]}→{paths[distEdge[0]][(distEdge[1] + 1) % paths[distEdge[0]].length]}</span>}
+                </div>
+              </div>
+              {distInfo && (
+                <div className="distance-input-row">
+                  <label>Distance:</label>
+                  <input
+                    type="number"
+                    className="distance-input"
+                    value={distValue}
+                    min="0"
+                    step="1"
+                    onChange={(e) => setDistValue(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') applyDistance(); }}
+                  />
+                  <button className="apply-btn" onClick={applyDistance}>Apply</button>
+                </div>
+              )}
+              {distInfo && (
+                <div className="distance-current">
+                  Current: {Math.round(Math.abs(distInfo.dist) * 1000) / 1000}
+                  {' '}({distInfo.dist >= 0 ? 'left' : 'right'} of edge)
+                </div>
+              )}
+            </div>
+          )}
 
           <h2>Paths</h2>
           <div className="path-list">
