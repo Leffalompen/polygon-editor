@@ -127,9 +127,11 @@ function distToSegment(px: number, py: number, ax: number, ay: number, bx: numbe
   return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }
 
+const initialHistory = loadHistory();
+
 function App() {
-  const [history, setHistory] = useState<Point[][]>(() => loadHistory().entries);
-  const [historyPos, setHistoryPos] = useState(() => loadHistory().pos);
+  const [history, setHistory] = useState<Point[][]>(initialHistory.entries);
+  const [historyPos, setHistoryPos] = useState(initialHistory.pos);
   const points = history[historyPos];
 
   const pushPoints = useCallback((next: Point[]) => {
