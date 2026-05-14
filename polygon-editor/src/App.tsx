@@ -114,19 +114,48 @@ function calcConvexity(state: PolyState): number {
     return crossings;
   };
 
-  // Strategy: for many angles, cast rays through each vertex
-  const angles = 72;
-  for (let ai = 0; ai < angles; ai++) {
-    const angle = (ai * Math.PI) / angles;
+  const testRay = (ox: number, oy: number, dx: number, dy: number) => {
+    const crossings = countCrossings(ox, oy, dx, dy);
+    if (crossings > maxCrossings) maxCrossings = crossings;
+  };
+
+  // Collect all significant sample points: vertices + edge midpoints
+  const samplePoints: Point[] = [...points];
+  for (const [[x1, y1], [x2, y2]] of edges) {
+    samplePoints.push([(x1 + x2) / 2, (y1 + y2) / 2]);
+  }
+
+  // Strategy 1: cast rays through each sample point at many angles
+  const numAngles = 72;
+  for (let ai = 0; ai < numAngles; ai++) {
+    const angle = (ai * Math.PI) / numAngles;
     const dx = Math.cos(angle);
     const dy = Math.sin(angle);
-    // Cast a ray through each point (perpendicular offset to pass through vertex)
-    for (const [vx, vy] of points) {
-      // Ray origin: move from vertex backwards along direction
-      const ox = vx - dx * extent;
-      const oy = vy - dy * extent;
-      const crossings = countCrossings(ox, oy, dx, dy);
-      if (crossings > maxCrossings) maxCrossings = crossings;
+    for (const [vx, vy] of samplePoints) {
+      testRay(vx - dx * extent, vy - dy * extent, dx, dy);
+    }
+  }
+
+  // Strategy 2: cast rays through every pair of sample points
+  // Lines connecting points from different paths maximize boundary crossings
+  // Limit to avoid O(n^2) blowup with many points
+  const maxSamples = Math.min(samplePoints.length, 60);
+  for (let i = 0; i < maxSamples; i++) {
+    for (let j = i + 1; j < maxSamples; j++) {
+      const [x1, y1] = samplePoints[i];
+      const [x2, y2] = samplePoints[j];
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-12) continue;
+      const ndx = dx / len;
+      const ndy = dy / len;
+      testRay(x1 - ndx * extent, y1 - ndy * extent, ndx, ndy);
+      // Small perpendicular offsets to avoid vertex-on-edge degeneracies
+      const px = -ndy * 0.01;
+      const py = ndx * 0.01;
+      testRay(x1 - ndx * extent + px, y1 - ndy * extent + py, ndx, ndy);
+      testRay(x1 - ndx * extent - px, y1 - ndy * extent - py, ndx, ndy);
     }
   }
 
@@ -559,7 +588,8 @@ function App() {
 
       // Edges
       if (pathPts.length >= 2) {
-        ctx.strokeStyle = color.stroke;
+        const inMoveMode = editMode === 'move';
+        ctx.strokeStyle = (inMoveMode && !isActive) ? '#555' : color.stroke;
         ctx.lineWidth = isActive ? 2.5 : 1.5;
         if (!isActive) ctx.setLineDash([6, 4]);
         for (let i = 0; i < pathPts.length; i++) {
@@ -606,8 +636,9 @@ function App() {
         const isDragging = gi === dragIndex;
         ctx.beginPath();
         ctx.arc(cx, cy, isSelected || isDragging ? 8 : isActivePath ? 5 : 4, 0, Math.PI * 2);
-        ctx.fillStyle = isDragging ? '#ffaa00' : isSelected ? '#ff4444' : color.stroke;
-        ctx.globalAlpha = isActivePath ? 1 : 0.5;
+        const inMoveMode = editMode === 'move';
+        ctx.fillStyle = (inMoveMode && !isActivePath) ? '#555' : isDragging ? '#ffaa00' : isSelected ? '#ff4444' : color.stroke;
+        ctx.globalAlpha = isActivePath ? 1 : (inMoveMode ? 0.3 : 0.5);
         ctx.fill();
         ctx.strokeStyle = '#fff';
         ctx.lineWidth = isSelected || isDragging ? 2.5 : 1.5;
