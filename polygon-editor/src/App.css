@@ -84,6 +84,27 @@ canvas {
   font-size: 13px;
 }
 
+.move-btn {
+  background: transparent;
+  border: 1px solid #555;
+  color: #aaa;
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 12px;
+  padding: 1px 6px;
+  font-family: monospace;
+}
+
+.move-btn:hover:not(:disabled) {
+  background: #44aaff;
+  color: #fff;
+}
+
+.move-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
 .remove-btn {
   background: transparent;
   border: 1px solid #555;
@@ -130,4 +151,77 @@ canvas {
   font-family: monospace;
   font-size: 13px;
   resize: vertical;
+}
+
+.history-section h2 {
+  margin-top: 14px;
+}
+
+.history-controls {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.history-controls button {
+  flex: 1;
+  padding: 4px 0;
+  background: #2a2a4a;
+  border: 1px solid #555;
+  color: #ccc;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.history-controls button:hover:not(:disabled) {
+  background: #44aaff;
+  color: #fff;
+}
+
+.history-controls button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.history-list {
+  max-height: 160px;
+  overflow-y: auto;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #1a1a2e;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  padding: 3px 8px;
+  cursor: pointer;
+  border-bottom: 1px solid #2a2a3a;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.history-item:hover {
+  background: #2a2a4a;
+}
+
+.history-item.active {
+  background: #1a3a1a;
+  border-left: 3px solid #4e4;
+  font-weight: bold;
+}
+
+.history-item.future {
+  opacity: 0.45;
+}
+
+.history-index {
+  color: #666;
+  min-width: 22px;
+}
+
+.history-summary {
+  color: #aaa;
 }
