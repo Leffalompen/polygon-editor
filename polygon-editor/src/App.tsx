@@ -18,7 +18,7 @@ const STORAGE_POS_KEY = 'polygon-editor-history-pos-v2';
 const POINT_HIT_RADIUS = 10;
 const EDGE_HIT_RADIUS = 8;
 
-type EditMode = 'normal' | 'distance';
+type EditMode = 'normal' | 'distance' | 'move' | 'angle';
 
 /** Signed distance from point P to the infinite line through A→B.
  *  Positive = left side of A→B, negative = right side. */
@@ -95,40 +95,41 @@ function calcConvexity(state: PolyState): number {
     if (y < minY) minY = y; if (y > maxY) maxY = y;
   }
   const extent = Math.max(maxX - minX, maxY - minY, 1) * 2;
-  const cx = (minX + maxX) / 2;
-  const cy = (minY + maxY) / 2;
 
-  const angles = 36;
   let maxCrossings = 0;
 
+  // Count crossings for a ray from origin (ox,oy) in direction (dx,dy)
+  const countCrossings = (ox: number, oy: number, dx: number, dy: number): number => {
+    let crossings = 0;
+    for (const [[x1, y1], [x2, y2]] of edges) {
+      const ex = x2 - x1;
+      const ey = y2 - y1;
+      const denom = dx * ey - dy * ex;
+      if (Math.abs(denom) < 1e-12) continue;
+      const u = (dx * (y1 - oy) - dy * (x1 - ox)) / denom;
+      if (u < 0 || u > 1) continue;
+      const s = (ex * (y1 - oy) - ey * (x1 - ox)) / (ex * dy - ey * dx);
+      if (s >= 0) crossings++;
+    }
+    return crossings;
+  };
+
+  // Strategy: for many angles, cast rays through each vertex
+  const angles = 72;
   for (let ai = 0; ai < angles; ai++) {
     const angle = (ai * Math.PI) / angles;
     const dx = Math.cos(angle);
     const dy = Math.sin(angle);
-    const px = -dy;
-    const py = dx;
-    const projs = points.map(([x, y]) => (x - cx) * px + (y - cy) * py);
-    const pMin = Math.min(...projs);
-    const pMax = Math.max(...projs);
-    const steps = 20;
-    for (let si = 0; si <= steps; si++) {
-      const t = pMin + (pMax - pMin) * (si / steps);
-      const ox = cx + t * px - dx * extent;
-      const oy = cy + t * py - dy * extent;
-      let crossings = 0;
-      for (const [[x1, y1], [x2, y2]] of edges) {
-        const ex = x2 - x1;
-        const ey = y2 - y1;
-        const denom = dx * ey - dy * ex;
-        if (Math.abs(denom) < 1e-12) continue;
-        const u = (dx * (y1 - oy) - dy * (x1 - ox)) / denom;
-        if (u < 0 || u > 1) continue;
-        const s = (ex * (y1 - oy) - ey * (x1 - ox)) / (ex * dy - ey * dx);
-        if (s >= 0) crossings++;
-      }
+    // Cast a ray through each point (perpendicular offset to pass through vertex)
+    for (const [vx, vy] of points) {
+      // Ray origin: move from vertex backwards along direction
+      const ox = vx - dx * extent;
+      const oy = vy - dy * extent;
+      const crossings = countCrossings(ox, oy, dx, dy);
       if (crossings > maxCrossings) maxCrossings = crossings;
     }
   }
+
   return Math.max(1, Math.ceil(maxCrossings / 2));
 }
 
@@ -161,6 +162,15 @@ function App() {
   const [distPoint, setDistPoint] = useState<number | null>(null);
   const [distEdge, setDistEdge] = useState<[number, number] | null>(null); // [pathIdx, positionInPath]
   const [distValue, setDistValue] = useState<string>('');
+
+  // Move mode state
+  const [moveDragging, setMoveDragging] = useState(false);
+  const [moveStart, setMoveStart] = useState<[number, number]>([0, 0]); // world coords at drag start
+  const [moveOrigPoints, setMoveOrigPoints] = useState<Point[]>([]); // points snapshot at drag start
+
+  // Angle mode state: select points A, B, C; angle is at B between edges BA and BC
+  const [anglePoints, setAnglePoints] = useState<number[]>([]); // up to 3 global indices [A, B, C]
+  const [angleValue, setAngleValue] = useState<string>('');
 
   const pushState = useCallback((next: PolyState) => {
     setHistory((prev) => {
@@ -278,12 +288,12 @@ function App() {
     return { a, b, p, dist, gi1, gi2 };
   })();
 
-  // When distPoint/distEdge change, update the input value
+  // When distPoint/distEdge/points change, update the input value
   useEffect(() => {
     if (distInfo) {
       setDistValue(String(Math.round(Math.abs(distInfo.dist) * 1000) / 1000));
     }
-  }, [distPoint, distEdge]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [distPoint, distEdge, points]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const applyDistance = useCallback(() => {
     if (distPoint === null || distEdge === null || !distInfo) return;
@@ -300,13 +310,71 @@ function App() {
     const nx = -dy / len;
     const ny = dx / len;
     // Preserve the side: if current signed dist is negative, place on negative side
-    const sign = distInfo.dist >= 0 ? 1 : -1;
-    const wx = Math.round((projX + nx * newDist * sign) / GRID_SIZE) * GRID_SIZE;
-    const wy = Math.round((projY + ny * newDist * sign) / GRID_SIZE) * GRID_SIZE;
+    // If dist is ~0, default to positive (left) side
+    const sign = distInfo.dist < -1e-9 ? -1 : 1;
+    // Don't grid-snap: use exact floating point to honor the distance precisely
+    const wx = projX + nx * newDist * sign;
+    const wy = projY + ny * newDist * sign;
+    // Round to reasonable precision to avoid floating point noise
+    const finalX = Math.round(wx * 1000) / 1000;
+    const finalY = Math.round(wy * 1000) / 1000;
+    // Only push if the point actually moved
+    if (finalX === p[0] && finalY === p[1]) return;
     const newPoints = [...points];
-    newPoints[distPoint] = [wx, wy];
+    newPoints[distPoint] = [finalX, finalY];
     pushState({ points: newPoints, paths });
   }, [distPoint, distEdge, distInfo, distValue, points, paths, pushState]);
+
+  // Angle mode: compute current angle at B between edges BA and BC (in degrees)
+  const angleInfo = (() => {
+    if (anglePoints.length < 3) return null;
+    const [ai, bi, ci] = anglePoints;
+    const a = points[ai];
+    const b = points[bi];
+    const c = points[ci];
+    if (!a || !b || !c) return null;
+    const bax = a[0] - b[0], bay = a[1] - b[1];
+    const bcx = c[0] - b[0], bcy = c[1] - b[1];
+    const dot = bax * bcx + bay * bcy;
+    const cross = bax * bcy - bay * bcx;
+    // Unsigned angle (always 0..180)
+    const angle = Math.atan2(Math.abs(cross), dot) * (180 / Math.PI);
+    // Signed angle from BA to BC (positive = counterclockwise)
+    const signedAngle = Math.atan2(cross, dot);
+    return { a, b, c, angle, cross, signedAngle };
+  })();
+
+  // Sync angle input when selection changes
+  useEffect(() => {
+    if (angleInfo) {
+      setAngleValue(String(Math.round(angleInfo.angle * 1000) / 1000));
+    }
+  }, [anglePoints[0], anglePoints[1], anglePoints[2], points]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const applyAngle = useCallback(() => {
+    if (anglePoints.length < 3 || !angleInfo) return;
+    const newAngle = parseFloat(angleValue);
+    if (isNaN(newAngle) || newAngle <= 0 || newAngle >= 360) return;
+    const [, , ci] = anglePoints;
+    const { b, c, signedAngle } = angleInfo;
+    const a = points[anglePoints[0]];
+    const bcLen = Math.hypot(c[0] - b[0], c[1] - b[1]);
+    if (bcLen === 0) return;
+    // Compute the current absolute angle of BA direction
+    const baAngle = Math.atan2(a[1] - b[1], a[0] - b[0]);
+    // Preserve direction: signedAngle tells us which way C is rotated from BA
+    // Apply new magnitude with same sign
+    const sign = signedAngle >= 0 ? 1 : -1;
+    const newSignedAngle = sign * newAngle * (Math.PI / 180);
+    // BC angle = BA angle + signed rotation from BA to BC
+    const newBcAngle = baAngle + newSignedAngle;
+    const newCx = Math.round((b[0] + bcLen * Math.cos(newBcAngle)) * 1000) / 1000;
+    const newCy = Math.round((b[1] + bcLen * Math.sin(newBcAngle)) * 1000) / 1000;
+    if (newCx === c[0] && newCy === c[1]) return;
+    const newPoints = [...points];
+    newPoints[ci] = [newCx, newCy];
+    pushState({ points: newPoints, paths });
+  }, [anglePoints, angleInfo, angleValue, points, paths, pushState]);
 
   // Hit test: find global point index under cursor (across all paths)
   const hitTestPoint = useCallback((cx: number, cy: number): number | null => {
@@ -617,7 +685,69 @@ function App() {
         }
       }
     }
-  }, [getPathPoints, points, paths, selectedIndex, activePath, dragIndex, dragPreview, offset, scale, toCanvas, canvasSize, bgImage, imageOpacity, polyOpacity, editMode, distPoint, distEdge]);
+
+    // Angle mode visual feedback
+    if (editMode === 'angle' && anglePoints.length > 0) {
+      // Highlight selected points
+      for (let i = 0; i < anglePoints.length; i++) {
+        const pt = points[anglePoints[i]];
+        if (!pt) continue;
+        const [px, py] = toCanvas(pt[0], pt[1]);
+        ctx.beginPath();
+        ctx.arc(px, py, 12, 0, Math.PI * 2);
+        ctx.strokeStyle = i === 1 ? '#ff44ff' : '#00ffcc'; // B is magenta, A/C are cyan
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([4, 3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Label
+        ctx.fillStyle = i === 1 ? '#ff44ff' : '#00ffcc';
+        ctx.font = 'bold 12px monospace';
+        ctx.fillText(['A', 'B', 'C'][i], px + 14, py - 10);
+      }
+      // Draw edges BA and BC
+      if (anglePoints.length >= 2) {
+        const a = points[anglePoints[0]];
+        const b = points[anglePoints[1]];
+        if (a && b) {
+          const [ax, ay] = toCanvas(a[0], a[1]);
+          const [bx, by] = toCanvas(b[0], b[1]);
+          ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(ax, ay);
+          ctx.strokeStyle = '#ff44ff'; ctx.lineWidth = 2; ctx.stroke();
+        }
+      }
+      if (anglePoints.length >= 3) {
+        const b = points[anglePoints[1]];
+        const c = points[anglePoints[2]];
+        if (b && c) {
+          const [bx, by] = toCanvas(b[0], b[1]);
+          const [cx2, cy2] = toCanvas(c[0], c[1]);
+          ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(cx2, cy2);
+          ctx.strokeStyle = '#ff44ff'; ctx.lineWidth = 2; ctx.stroke();
+        }
+        // Draw arc showing the angle
+        if (angleInfo) {
+          const bPt = points[anglePoints[1]];
+          const [bx, by] = toCanvas(bPt[0], bPt[1]);
+          const aPt = points[anglePoints[0]];
+          const cPt = points[anglePoints[2]];
+          const baAngle = Math.atan2(-(aPt[1] - bPt[1]), aPt[0] - bPt[0]); // canvas Y is flipped
+          const bcAngle = Math.atan2(-(cPt[1] - bPt[1]), cPt[0] - bPt[0]);
+          ctx.beginPath();
+          const radius = 25;
+          // Draw arc from BA angle to BC angle
+          const startAngle = angleInfo.cross >= 0 ? bcAngle : baAngle;
+          const endAngle = angleInfo.cross >= 0 ? baAngle : bcAngle;
+          ctx.arc(bx, by, radius, startAngle, endAngle);
+          ctx.strokeStyle = '#ffcc00'; ctx.lineWidth = 1.5; ctx.stroke();
+          // Label
+          const midAngle = (startAngle + endAngle) / 2;
+          ctx.fillStyle = '#ffcc00'; ctx.font = 'bold 11px monospace';
+          ctx.fillText(`${Math.round(angleInfo.angle * 10) / 10}°`, bx + 30 * Math.cos(midAngle), by + 30 * Math.sin(midAngle));
+        }
+      }
+    }
+  }, [getPathPoints, points, paths, selectedIndex, activePath, dragIndex, dragPreview, offset, scale, toCanvas, canvasSize, bgImage, imageOpacity, polyOpacity, editMode, distPoint, distEdge, anglePoints, angleInfo]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -655,6 +785,14 @@ function App() {
     }
 
     if (e.shiftKey && editMode === 'distance') {
+      setIsPanning(true); setPanStart([e.clientX, e.clientY]); setOffsetStart([...offset]); e.preventDefault(); return;
+    }
+
+    if (e.shiftKey && editMode === 'move') {
+      setIsPanning(true); setPanStart([e.clientX, e.clientY]); setOffsetStart([...offset]); e.preventDefault(); return;
+    }
+
+    if (e.shiftKey && editMode === 'angle') {
       setIsPanning(true); setPanStart([e.clientX, e.clientY]); setOffsetStart([...offset]); e.preventDefault(); return;
     }
 
@@ -713,6 +851,29 @@ function App() {
       return;
     }
 
+    // Angle mode: select 3 points A, B, C
+    if (editMode === 'angle') {
+      const hitPt = hitTestPoint(cx, cy);
+      if (hitPt !== null) {
+        if (anglePoints.length < 3) {
+          setAnglePoints([...anglePoints, hitPt]);
+        } else {
+          // Reset, start new selection
+          setAnglePoints([hitPt]);
+        }
+      }
+      return;
+    }
+
+    // Move mode: drag to move all points in active path
+    if (editMode === 'move') {
+      const [wx, wy] = toWorld(cx, cy);
+      setMoveDragging(true);
+      setMoveStart([wx, wy]);
+      setMoveOrigPoints([...points]);
+      return;
+    }
+
     // Normal mode: click on edge of active path to insert point
     const hitEdge = hitTestEdge(cx, cy);
     if (hitEdge !== null) {
@@ -746,6 +907,24 @@ function App() {
       setOffset([offsetStart[0] + e.clientX - panStart[0], offsetStart[1] + e.clientY - panStart[1]]);
       return;
     }
+    if (moveDragging) {
+      const rect = canvasRef.current!.getBoundingClientRect();
+      const [wx, wy] = toWorld(e.clientX - rect.left, e.clientY - rect.top);
+      const dx = wx - moveStart[0];
+      const dy = wy - moveStart[1];
+      const pathIndices = paths[activePath] || [];
+      const newPoints = [...moveOrigPoints];
+      for (const gi of pathIndices) {
+        newPoints[gi] = [moveOrigPoints[gi][0] + dx, moveOrigPoints[gi][1] + dy];
+      }
+      // Update state directly for live preview (don't push history yet)
+      setHistory((prev) => {
+        const updated = [...prev];
+        updated[historyPos] = { points: newPoints, paths };
+        return updated;
+      });
+      return;
+    }
     if (dragIndex !== null) {
       const rect = canvasRef.current!.getBoundingClientRect();
       setDragPreview(toWorld(e.clientX - rect.left, e.clientY - rect.top));
@@ -755,7 +934,11 @@ function App() {
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
     const canvas = canvasRef.current!;
-    if (editMode === 'distance') {
+    if (editMode === 'move') {
+      canvas.style.cursor = moveDragging ? 'grabbing' : 'grab';
+    } else if (editMode === 'angle') {
+      canvas.style.cursor = hitTestPoint(cx, cy) !== null ? 'pointer' : 'default';
+    } else if (editMode === 'distance') {
       if (hitTestPoint(cx, cy) !== null) canvas.style.cursor = 'pointer';
       else if (distPoint !== null && hitTestEdgeAny(cx, cy) !== null) canvas.style.cursor = 'crosshair';
       else canvas.style.cursor = 'default';
@@ -768,6 +951,19 @@ function App() {
   };
 
   const handleMouseUp = () => {
+    if (moveDragging) {
+      setMoveDragging(false);
+      // Commit the move as a new history entry (restore original, then push new)
+      const currentPoints = [...points]; // already has the moved positions from live preview
+      // Restore history to original, then push the final state
+      setHistory((prev) => {
+        const updated = [...prev];
+        updated[historyPos] = { points: moveOrigPoints, paths };
+        return updated;
+      });
+      pushState({ points: currentPoints, paths });
+      return;
+    }
     if (dragIndex !== null && dragPreview !== null) {
       const newPoints = [...points];
       newPoints[dragIndex] = dragPreview;
@@ -779,6 +975,15 @@ function App() {
   };
 
   const handleMouseLeave = () => {
+    if (moveDragging) {
+      setMoveDragging(false);
+      // Cancel: restore original points
+      setHistory((prev) => {
+        const updated = [...prev];
+        updated[historyPos] = { points: moveOrigPoints, paths };
+        return updated;
+      });
+    }
     if (dragIndex !== null) { setDragIndex(null); setDragPreview(null); }
     setIsPanning(false);
   };
@@ -866,7 +1071,16 @@ function App() {
   };
 
   // --- Output ---
-  const convexity = paths[0]?.length >= 3 ? calcConvexity(state) : 1;
+  const [convexity, setConvexity] = useState(() => paths[0]?.length >= 3 ? calcConvexity(state) : 1);
+
+  // Auto-recalculate convexity when state changes
+  useEffect(() => {
+    setConvexity(paths[0]?.length >= 3 ? calcConvexity(state) : 1);
+  }, [state]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const recalcConvexity = useCallback(() => {
+    setConvexity(paths[0]?.length >= 3 ? calcConvexity(state) : 1);
+  }, [state, paths]);
 
   const openscadOutput = (() => {
     const ptsStr = `[${points.map((p) => `[${p[0]},${p[1]}]`).join(',')}]`;
@@ -902,11 +1116,17 @@ function App() {
           <div className="canvas-hint">
             {editMode === 'normal'
               ? 'Click edge to insert point | Shift+drag point to move | Middle-mouse/Shift+click to pan | Scroll to zoom'
-              : distPoint === null
-                ? 'Click a point to select it | Middle-mouse to pan | Scroll to zoom'
-                : distEdge === null
-                  ? 'Click an edge to measure distance | Click another point to re-select'
-                  : 'Enter distance and press Apply or Enter | Click to re-select'}
+              : editMode === 'move'
+                ? 'Drag to move active path | Middle-mouse to pan | Scroll to zoom'
+                : editMode === 'angle'
+                  ? anglePoints.length < 3
+                    ? 'Click 3 points: A, B (vertex), C | Middle-mouse to pan'
+                    : 'Enter angle and press Apply or Enter | Click to re-select'
+                  : distPoint === null
+                    ? 'Click a point to select it | Middle-mouse to pan | Scroll to zoom'
+                    : distEdge === null
+                      ? 'Click an edge to measure distance | Click another point to re-select'
+                      : 'Enter distance and press Apply or Enter | Click to re-select'}
           </div>
         </div>
         <div className="sidebar">
@@ -941,14 +1161,24 @@ function App() {
           <div className="mode-toolbar">
             <button
               className={`mode-btn ${editMode === 'normal' ? 'active' : ''}`}
-              onClick={() => { setEditMode('normal'); setDistPoint(null); setDistEdge(null); }}
+              onClick={() => { setEditMode('normal'); setDistPoint(null); setDistEdge(null); setAnglePoints([]); }}
               title="Normal editing mode"
             >Edit</button>
             <button
               className={`mode-btn ${editMode === 'distance' ? 'active' : ''}`}
-              onClick={() => { setEditMode('distance'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); }}
+              onClick={() => { setEditMode('distance'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); }}
               title="Set point distance from a line"
             >Distance</button>
+            <button
+              className={`mode-btn ${editMode === 'move' ? 'active' : ''}`}
+              onClick={() => { setEditMode('move'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); }}
+              title="Drag to move entire active path"
+            >Move</button>
+            <button
+              className={`mode-btn ${editMode === 'angle' ? 'active' : ''}`}
+              onClick={() => { setEditMode('angle'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); }}
+              title="Set angle between two edges at a vertex"
+            >Angle</button>
           </div>
 
           {editMode === 'distance' && (
@@ -980,6 +1210,43 @@ function App() {
                 <div className="distance-current">
                   Current: {Math.round(Math.abs(distInfo.dist) * 1000) / 1000}
                   {' '}({distInfo.dist >= 0 ? 'left' : 'right'} of edge)
+                </div>
+              )}
+            </div>
+          )}
+
+          {editMode === 'angle' && (
+            <div className="distance-panel">
+              <div className="distance-steps">
+                <div className={`distance-step ${anglePoints.length === 0 ? 'current' : 'done'}`}>
+                  1. Click point A {anglePoints.length >= 1 && <span className="step-done">— pt {anglePoints[0]}</span>}
+                </div>
+                <div className={`distance-step ${anglePoints.length === 1 ? 'current' : anglePoints.length >= 2 ? 'done' : ''}`}>
+                  2. Click point B (vertex) {anglePoints.length >= 2 && <span className="step-done">— pt {anglePoints[1]}</span>}
+                </div>
+                <div className={`distance-step ${anglePoints.length === 2 ? 'current' : anglePoints.length >= 3 ? 'done' : ''}`}>
+                  3. Click point C {anglePoints.length >= 3 && <span className="step-done">— pt {anglePoints[2]}</span>}
+                </div>
+              </div>
+              {angleInfo && (
+                <div className="distance-input-row">
+                  <label>Angle°:</label>
+                  <input
+                    type="number"
+                    className="distance-input"
+                    value={angleValue}
+                    min="0.001"
+                    max="359.999"
+                    step="1"
+                    onChange={(e) => setAngleValue(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') applyAngle(); }}
+                  />
+                  <button className="apply-btn" onClick={applyAngle}>Apply</button>
+                </div>
+              )}
+              {angleInfo && (
+                <div className="distance-current">
+                  Current: {Math.round(angleInfo.angle * 1000) / 1000}° (moves C)
                 </div>
               )}
             </div>
@@ -1033,6 +1300,7 @@ function App() {
           <div className="convexity-label">
             Convexity: <span className={convexity <= 1 ? 'convex' : 'concave'}>{convexity}</span>
             {convexity <= 1 ? ' (convex)' : ' (concave)'}
+            <button className="recalc-btn" onClick={recalcConvexity} title="Recalculate convexity">↻</button>
           </div>
           <h2>OpenSCAD Output</h2>
           <textarea

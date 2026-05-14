@@ -38,6 +38,15 @@ npm run preview    # serve production build
 
 `build` runs typecheck first — use it as the verification step. There are no tests.
 
+## Editing Modes
+
+The editor has a mode toolbar with four modes:
+
+- **Edit** (normal) — click edge midpoints to insert points, shift+drag to move points
+- **Distance** — select a point then an edge; set the perpendicular distance from the point to the infinite line defined by the edge. Point moves along the perpendicular, no grid snapping.
+- **Move** — drag to translate all points in the active path (outer or a hole) together
+- **Angle** — select 3 points A, B, C; set the angle at vertex B between edges BA and BC. Point C is rotated around B to achieve the target angle, preserving the BC edge length.
+
 ## Conventions
 
 - Output format must match OpenSCAD `polygon()` syntax exactly
@@ -52,3 +61,4 @@ npm run preview    # serve production build
 - Each path has a distinct color (outer = gold, holes = red, blue, purple, green, orange)
 - Active path: solid thick edges with midpoint diamonds; inactive: dashed, dimmer
 - Convexity value is computed via ray-casting and included in output when paths > 1
+- Convexity auto-recalculates on state change; manual recalculate button (↻) also available
