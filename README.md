@@ -3,7 +3,7 @@
 A browser-based visual editor for creating 2D polygons with hole support, designed for use with OpenSCAD. Build shapes by clicking, adjust with precision tools, then copy the `polygon()` output directly into your `.scad` files.
 
 ### web page available
-https://github.com/Leffalompen/polygon-editor
+https://leffalompen.github.io/polygon-editor/
 
 ## Getting Started
 
