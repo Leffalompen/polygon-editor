@@ -2,6 +2,9 @@
 
 A browser-based visual editor for creating 2D polygons with hole support, designed for use with OpenSCAD. Build shapes by clicking, adjust with precision tools, then copy the `polygon()` output directly into your `.scad` files.
 
+### web page available
+https://github.com/Leffalompen/polygon-editor
+
 ## Getting Started
 
 ```bash
@@ -11,6 +14,9 @@ npm run dev
 ```
 
 Open `http://localhost:5173` in your browser. The editor is optimized for a 2000x1300 window.
+
+## Simple editor
+There is not real constraints. But it is possible to edit angles, lengths and parallel lines. They do however destroy for each other and are not kept.
 
 ## Basic Controls
 
@@ -118,7 +124,7 @@ The output panel shows the `polygon()` call ready to paste into OpenSCAD:
 polygon(points=[[0,0],[50,0],[25,40]], paths=[[0,1,2]]);
 ```
 
-- Only referenced points are included (orphaned points from deletions are excluded)
+- Only referenced points are included
 - Points are re-indexed to be contiguous
 - Path winding order is always preserved via the `paths=` parameter
 - Convexity is auto-calculated and included when greater than 1
