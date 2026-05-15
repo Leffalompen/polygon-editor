@@ -24,6 +24,7 @@ type PolyState = { points: Point[], paths: number[][] }
 - `paths[0]` — outer shape (indices into `points`)
 - `paths[1+]` — holes (indices into `points`)
 - Stored in localStorage under key `polygon-editor-history-v2` (50-entry undo history)
+- Path names stored separately in `polygon-editor-path-names-v2` (not part of undo history)
 
 ## Commands
 
@@ -40,12 +41,16 @@ npm run preview    # serve production build
 
 ## Editing Modes
 
-The editor has a mode toolbar with four modes:
+The editor has a mode toolbar with eight modes:
 
 - **Edit** (normal) — click edge midpoints to insert points, shift+drag to move points
 - **Distance** — select a point then an edge; set the perpendicular distance from the point to the infinite line defined by the edge. Point moves along the perpendicular, no grid snapping.
 - **Move** — drag to translate all points in the active path (outer or a hole) together
+- **Move All** — drag to translate every point in every path together, preserving relative positions
 - **Angle** — select 3 points A, B, C; set the angle at vertex B between edges BA and BC. Point C is rotated around B to achieve the target angle, preserving the BC edge length.
+- **Length** — select an edge; set its length. The second endpoint moves along the edge direction to match the new length.
+- **Parallel** — select a base edge (reference) then a target edge; click "Make Parallel" to rotate the target edge around its midpoint to match the base edge's angle (preserving length, choosing the closer of the two parallel directions).
+- **Duplicate** — click to duplicate the active path (creates a copy with new points), then drag to place the copy. The new path gets the original's name + " copy".
 
 ## Conventions
 
@@ -62,3 +67,6 @@ The editor has a mode toolbar with four modes:
 - Active path: solid thick edges with midpoint diamonds; inactive: dashed, dimmer
 - Convexity value is computed via ray-casting and included in output when paths > 1
 - Convexity auto-recalculates on state change; manual recalculate button (↻) also available
+- Point coordinates are directly editable via number inputs in the sidebar
+- Path names are editable (double-click to rename); stored in localStorage separately
+- OpenSCAD polygon text can be imported via the "Import from OpenSCAD" panel below the output

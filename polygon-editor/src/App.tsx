@@ -15,10 +15,11 @@ const INITIAL_SCALE = 4;
 const MAX_HISTORY = 50;
 const STORAGE_KEY = 'polygon-editor-history-v2';
 const STORAGE_POS_KEY = 'polygon-editor-history-pos-v2';
+const STORAGE_NAMES_KEY = 'polygon-editor-path-names-v2';
 const POINT_HIT_RADIUS = 10;
 const EDGE_HIT_RADIUS = 8;
 
-type EditMode = 'normal' | 'distance' | 'move' | 'angle';
+type EditMode = 'normal' | 'distance' | 'move' | 'moveAll' | 'angle' | 'length' | 'parallel' | 'duplicate';
 
 /** Signed distance from point P to the infinite line through A→B.
  *  Positive = left side of A→B, negative = right side. */
@@ -162,6 +163,33 @@ function calcConvexity(state: PolyState): number {
   return Math.max(1, Math.ceil(maxCrossings / 2));
 }
 
+function parseOpenSCAD(text: string): PolyState | null {
+  try {
+    // Extract points: polygon(points=[[x,y],[x,y],...], ...)
+    const pointsMatch = text.match(/points\s*=\s*\[(\[[\s\S]*?\])\s*\]/);
+    if (!pointsMatch) return null;
+    // Parse nested array of points
+    const pointsStr = '[' + pointsMatch[1] + ']';
+    const points: Point[] = JSON.parse(pointsStr);
+    if (!Array.isArray(points) || points.length < 3) return null;
+    for (const p of points) {
+      if (!Array.isArray(p) || p.length < 2 || typeof p[0] !== 'number' || typeof p[1] !== 'number') return null;
+    }
+    // Extract paths (optional)
+    const pathsMatch = text.match(/paths\s*=\s*(\[[\s\S]*?\])\s*[,)]/);
+    let paths: number[][];
+    if (pathsMatch) {
+      paths = JSON.parse(pathsMatch[1]);
+      if (!Array.isArray(paths) || paths.length === 0) return null;
+    } else {
+      paths = [points.map((_, i) => i)];
+    }
+    return { points: points.map(p => [p[0], p[1]] as Point), paths };
+  } catch {
+    return null;
+  }
+}
+
 function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
   const dx = bx - ax;
   const dy = by - ay;
@@ -185,6 +213,26 @@ function App() {
   // Selected point index (global index into points[])
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
 
+  // Path names (stored separately, not in undo history)
+  const [pathNames, setPathNames] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_NAMES_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch { /* ignore */ }
+    return [];
+  });
+  const [editingPathName, setEditingPathName] = useState<number | null>(null);
+
+  const getPathName = (pi: number) => pathNames[pi] || (pi === 0 ? 'Outer' : `Hole ${pi}`);
+
+  const setPathName = (pi: number, name: string) => {
+    const updated = [...pathNames];
+    while (updated.length <= pi) updated.push('');
+    updated[pi] = name;
+    setPathNames(updated);
+    try { localStorage.setItem(STORAGE_NAMES_KEY, JSON.stringify(updated)); } catch { /* */ }
+  };
+
   // Editing mode
   const [editMode, setEditMode] = useState<EditMode>('normal');
   // Distance mode state: selected point, selected edge (as [pathIdx, edgeIdx])
@@ -200,6 +248,20 @@ function App() {
   // Angle mode state: select points A, B, C; angle is at B between edges BA and BC
   const [anglePoints, setAnglePoints] = useState<number[]>([]); // up to 3 global indices [A, B, C]
   const [angleValue, setAngleValue] = useState<string>('');
+
+  // Length mode state
+  const [lengthEdge, setLengthEdge] = useState<[number, number] | null>(null); // [pathIdx, posInPath]
+  const [lengthValue, setLengthValue] = useState<string>('');
+
+  // Parallel mode state
+  const [parallelBase, setParallelBase] = useState<[number, number] | null>(null); // base edge [pathIdx, posInPath]
+  const [parallelTarget, setParallelTarget] = useState<[number, number] | null>(null); // target edge
+
+  // Duplicate mode state: after duplicating, we enter a drag to place the copy
+  const [dupDragging, setDupDragging] = useState(false);
+  const [dupStart, setDupStart] = useState<[number, number]>([0, 0]);
+  const [dupOrigPoints, setDupOrigPoints] = useState<Point[]>([]);
+  const [dupNewPathIdx, setDupNewPathIdx] = useState<number | null>(null); // index of the newly created path
 
   const pushState = useCallback((next: PolyState) => {
     setHistory((prev) => {
@@ -244,6 +306,8 @@ function App() {
   const [bgImage, setBgImage] = useState<HTMLImageElement | null>(null);
   const [imageOpacity, setImageOpacity] = useState(0.5);
   const [polyOpacity, setPolyOpacity] = useState(0.35);
+  const [showImport, setShowImport] = useState(false);
+  const [importText, setImportText] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -404,6 +468,97 @@ function App() {
     newPoints[ci] = [newCx, newCy];
     pushState({ points: newPoints, paths });
   }, [anglePoints, angleInfo, angleValue, points, paths, pushState]);
+
+  // Length mode: compute current edge length
+  const lengthInfo = (() => {
+    if (lengthEdge === null) return null;
+    const [pi, ei] = lengthEdge;
+    const path = paths[pi];
+    if (!path || ei >= path.length) return null;
+    const gi1 = path[ei];
+    const gi2 = path[(ei + 1) % path.length];
+    const a = points[gi1];
+    const b = points[gi2];
+    if (!a || !b) return null;
+    const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    return { a, b, length, gi1, gi2 };
+  })();
+
+  useEffect(() => {
+    if (lengthInfo) {
+      setLengthValue(String(Math.round(lengthInfo.length * 1000) / 1000));
+    }
+  }, [lengthEdge, points]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const applyLength = useCallback(() => {
+    if (lengthEdge === null || !lengthInfo) return;
+    const newLen = parseFloat(lengthValue);
+    if (isNaN(newLen) || newLen <= 0) return;
+    const { a, b, length, gi2 } = lengthInfo;
+    if (length === 0) return;
+    // Move endpoint B along the A→B direction to achieve newLen
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const sc = newLen / length;
+    const newBx = Math.round((a[0] + dx * sc) * 1000) / 1000;
+    const newBy = Math.round((a[1] + dy * sc) * 1000) / 1000;
+    if (newBx === b[0] && newBy === b[1]) return;
+    const newPoints = [...points];
+    newPoints[gi2] = [newBx, newBy];
+    pushState({ points: newPoints, paths });
+  }, [lengthEdge, lengthInfo, lengthValue, points, paths, pushState]);
+
+  // Parallel mode: compute info
+  const parallelInfo = (() => {
+    if (parallelBase === null || parallelTarget === null) return null;
+    const [bpi, bei] = parallelBase;
+    const [tpi, tei] = parallelTarget;
+    const bPath = paths[bpi];
+    const tPath = paths[tpi];
+    if (!bPath || !tPath) return null;
+    const bgi1 = bPath[bei], bgi2 = bPath[(bei + 1) % bPath.length];
+    const tgi1 = tPath[tei], tgi2 = tPath[(tei + 1) % tPath.length];
+    const ba = points[bgi1], bb = points[bgi2];
+    const ta = points[tgi1], tb = points[tgi2];
+    if (!ba || !bb || !ta || !tb) return null;
+    const baseAngle = Math.atan2(bb[1] - ba[1], bb[0] - ba[0]);
+    const targetAngle = Math.atan2(tb[1] - ta[1], tb[0] - ta[0]);
+    return { ba, bb, ta, tb, baseAngle, targetAngle, tgi1, tgi2 };
+  })();
+
+  const applyParallel = useCallback(() => {
+    if (!parallelInfo) return;
+    const { ta, tb, baseAngle, targetAngle, tgi1, tgi2 } = parallelInfo;
+    // Rotate target edge around its midpoint to match base angle
+    // Choose the closer of the two parallel directions (same or opposite)
+    let angleDiff = baseAngle - targetAngle;
+    while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+    while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+    let angleDiff2 = angleDiff + Math.PI;
+    while (angleDiff2 > Math.PI) angleDiff2 -= 2 * Math.PI;
+    while (angleDiff2 < -Math.PI) angleDiff2 += 2 * Math.PI;
+    const rot = Math.abs(angleDiff) <= Math.abs(angleDiff2) ? angleDiff : angleDiff2;
+
+    const mx = (ta[0] + tb[0]) / 2;
+    const my = (ta[1] + tb[1]) / 2;
+    const cosR = Math.cos(rot);
+    const sinR = Math.sin(rot);
+    const rotateAround = (px: number, py: number): Point => {
+      const dx = px - mx;
+      const dy = py - my;
+      return [
+        Math.round((mx + dx * cosR - dy * sinR) * 1000) / 1000,
+        Math.round((my + dx * sinR + dy * cosR) * 1000) / 1000,
+      ];
+    };
+    const newA = rotateAround(ta[0], ta[1]);
+    const newB = rotateAround(tb[0], tb[1]);
+    if (newA[0] === ta[0] && newA[1] === ta[1] && newB[0] === tb[0] && newB[1] === tb[1]) return;
+    const newPoints = [...points];
+    newPoints[tgi1] = newA;
+    newPoints[tgi2] = newB;
+    pushState({ points: newPoints, paths });
+  }, [parallelInfo, points, paths, pushState]);
 
   // Hit test: find global point index under cursor (across all paths)
   const hitTestPoint = useCallback((cx: number, cy: number): number | null => {
@@ -588,7 +743,7 @@ function App() {
 
       // Edges
       if (pathPts.length >= 2) {
-        const inMoveMode = editMode === 'move';
+        const inMoveMode = editMode === 'move' || editMode === 'duplicate';
         ctx.strokeStyle = (inMoveMode && !isActive) ? '#555' : color.stroke;
         ctx.lineWidth = isActive ? 2.5 : 1.5;
         if (!isActive) ctx.setLineDash([6, 4]);
@@ -636,7 +791,7 @@ function App() {
         const isDragging = gi === dragIndex;
         ctx.beginPath();
         ctx.arc(cx, cy, isSelected || isDragging ? 8 : isActivePath ? 5 : 4, 0, Math.PI * 2);
-        const inMoveMode = editMode === 'move';
+        const inMoveMode = editMode === 'move' || editMode === 'duplicate';
         ctx.fillStyle = (inMoveMode && !isActivePath) ? '#555' : isDragging ? '#ffaa00' : isSelected ? '#ff4444' : color.stroke;
         ctx.globalAlpha = isActivePath ? 1 : (inMoveMode ? 0.3 : 0.5);
         ctx.fill();
@@ -778,7 +933,42 @@ function App() {
         }
       }
     }
-  }, [getPathPoints, points, paths, selectedIndex, activePath, dragIndex, dragPreview, offset, scale, toCanvas, canvasSize, bgImage, imageOpacity, polyOpacity, editMode, distPoint, distEdge, anglePoints, angleInfo]);
+
+    // Length mode visual feedback
+    if (editMode === 'length' && lengthEdge !== null && lengthInfo) {
+      const { a, b } = lengthInfo;
+      const [ax, ay] = toCanvas(a[0], a[1]);
+      const [bx, by] = toCanvas(b[0], b[1]);
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+      ctx.strokeStyle = '#00ffcc'; ctx.lineWidth = 3; ctx.stroke();
+      // Length label at midpoint
+      const mx = (ax + bx) / 2;
+      const my = (ay + by) / 2;
+      ctx.fillStyle = '#00ffcc'; ctx.font = 'bold 12px monospace';
+      ctx.fillText(String(Math.round(lengthInfo.length * 100) / 100), mx + 6, my - 6);
+    }
+
+    // Parallel mode visual feedback
+    if (editMode === 'parallel') {
+      const drawEdgeHighlight = (edge: [number, number], color: string, label: string) => {
+        const [pi, ei] = edge;
+        const path = paths[pi];
+        if (!path) return;
+        const gi1 = path[ei];
+        const gi2 = path[(ei + 1) % path.length];
+        const a = points[gi1], b = points[gi2];
+        if (!a || !b) return;
+        const [ax, ay] = toCanvas(a[0], a[1]);
+        const [bx, by] = toCanvas(b[0], b[1]);
+        ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+        ctx.strokeStyle = color; ctx.lineWidth = 3; ctx.stroke();
+        ctx.fillStyle = color; ctx.font = 'bold 11px monospace';
+        ctx.fillText(label, (ax + bx) / 2 + 6, (ay + by) / 2 - 6);
+      };
+      if (parallelBase !== null) drawEdgeHighlight(parallelBase, '#44ff44', 'base');
+      if (parallelTarget !== null) drawEdgeHighlight(parallelTarget, '#ff44ff', 'target');
+    }
+  }, [getPathPoints, points, paths, selectedIndex, activePath, dragIndex, dragPreview, offset, scale, toCanvas, canvasSize, bgImage, imageOpacity, polyOpacity, editMode, distPoint, distEdge, anglePoints, angleInfo, lengthEdge, lengthInfo, parallelBase, parallelTarget]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -819,11 +1009,15 @@ function App() {
       setIsPanning(true); setPanStart([e.clientX, e.clientY]); setOffsetStart([...offset]); e.preventDefault(); return;
     }
 
-    if (e.shiftKey && editMode === 'move') {
+    if (e.shiftKey && (editMode === 'move' || editMode === 'moveAll' || editMode === 'duplicate')) {
       setIsPanning(true); setPanStart([e.clientX, e.clientY]); setOffsetStart([...offset]); e.preventDefault(); return;
     }
 
     if (e.shiftKey && editMode === 'angle') {
+      setIsPanning(true); setPanStart([e.clientX, e.clientY]); setOffsetStart([...offset]); e.preventDefault(); return;
+    }
+
+    if (e.shiftKey && (editMode === 'length' || editMode === 'parallel')) {
       setIsPanning(true); setPanStart([e.clientX, e.clientY]); setOffsetStart([...offset]); e.preventDefault(); return;
     }
 
@@ -882,6 +1076,46 @@ function App() {
       return;
     }
 
+    // Duplicate mode: drag to move the active path
+    if (editMode === 'duplicate') {
+      if (!dupDragging) {
+        const [wx, wy] = toWorld(cx, cy);
+        setDupDragging(true);
+        setDupStart([wx, wy]);
+        setDupOrigPoints([...points]);
+      }
+      return;
+    }
+
+    // Length mode: select an edge
+    if (editMode === 'length') {
+      const hitEdgeResult = hitTestEdgeAny(cx, cy);
+      if (hitEdgeResult !== null) {
+        setLengthEdge(hitEdgeResult);
+      }
+      return;
+    }
+
+    // Parallel mode: select base edge, then target edge
+    if (editMode === 'parallel') {
+      const hitEdgeResult = hitTestEdgeAny(cx, cy);
+      if (hitEdgeResult !== null) {
+        if (parallelBase === null) {
+          setParallelBase(hitEdgeResult);
+          setParallelTarget(null);
+        } else if (parallelTarget === null) {
+          // Don't allow same edge as target
+          if (hitEdgeResult[0] === parallelBase[0] && hitEdgeResult[1] === parallelBase[1]) return;
+          setParallelTarget(hitEdgeResult);
+        } else {
+          // Re-select: click sets new base
+          setParallelBase(hitEdgeResult);
+          setParallelTarget(null);
+        }
+      }
+      return;
+    }
+
     // Angle mode: select 3 points A, B, C
     if (editMode === 'angle') {
       const hitPt = hitTestPoint(cx, cy);
@@ -893,6 +1127,15 @@ function App() {
           setAnglePoints([hitPt]);
         }
       }
+      return;
+    }
+
+    // Move All mode: drag to move every point in every path
+    if (editMode === 'moveAll') {
+      const [wx, wy] = toWorld(cx, cy);
+      setMoveDragging(true);
+      setMoveStart([wx, wy]);
+      setMoveOrigPoints([...points]);
       return;
     }
 
@@ -943,12 +1186,31 @@ function App() {
       const [wx, wy] = toWorld(e.clientX - rect.left, e.clientY - rect.top);
       const dx = wx - moveStart[0];
       const dy = wy - moveStart[1];
+      const newPoints = moveOrigPoints.map((p, gi) => {
+        if (editMode === 'moveAll' || (paths[activePath] || []).includes(gi)) {
+          return [p[0] + dx, p[1] + dy] as Point;
+        }
+        return p;
+      });
+      setHistory((prev) => {
+        const updated = [...prev];
+        updated[historyPos] = { points: newPoints, paths };
+        return updated;
+      });
+      return;
+    }
+    if (dupDragging) {
+      const rect = canvasRef.current!.getBoundingClientRect();
+      const [wx, wy] = toWorld(e.clientX - rect.left, e.clientY - rect.top);
+      const dx = wx - dupStart[0];
+      const dy = wy - dupStart[1];
       const pathIndices = paths[activePath] || [];
-      const newPoints = [...moveOrigPoints];
+      const newPoints = [...dupOrigPoints];
       for (const gi of pathIndices) {
-        newPoints[gi] = [moveOrigPoints[gi][0] + dx, moveOrigPoints[gi][1] + dy];
+        if (dupOrigPoints[gi]) {
+          newPoints[gi] = [dupOrigPoints[gi][0] + dx, dupOrigPoints[gi][1] + dy];
+        }
       }
-      // Update state directly for live preview (don't push history yet)
       setHistory((prev) => {
         const updated = [...prev];
         updated[historyPos] = { points: newPoints, paths };
@@ -965,8 +1227,12 @@ function App() {
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
     const canvas = canvasRef.current!;
-    if (editMode === 'move') {
+    if (editMode === 'move' || editMode === 'moveAll') {
       canvas.style.cursor = moveDragging ? 'grabbing' : 'grab';
+    } else if (editMode === 'duplicate') {
+      canvas.style.cursor = dupDragging ? 'grabbing' : 'grab';
+    } else if (editMode === 'length' || editMode === 'parallel') {
+      canvas.style.cursor = hitTestEdgeAny(cx, cy) !== null ? 'crosshair' : 'default';
     } else if (editMode === 'angle') {
       canvas.style.cursor = hitTestPoint(cx, cy) !== null ? 'pointer' : 'default';
     } else if (editMode === 'distance') {
@@ -984,15 +1250,25 @@ function App() {
   const handleMouseUp = () => {
     if (moveDragging) {
       setMoveDragging(false);
-      // Commit the move as a new history entry (restore original, then push new)
-      const currentPoints = [...points]; // already has the moved positions from live preview
-      // Restore history to original, then push the final state
+      const currentPoints = [...points];
       setHistory((prev) => {
         const updated = [...prev];
         updated[historyPos] = { points: moveOrigPoints, paths };
         return updated;
       });
       pushState({ points: currentPoints, paths });
+      return;
+    }
+    if (dupDragging) {
+      setDupDragging(false);
+      const currentPoints = [...points];
+      setHistory((prev) => {
+        const updated = [...prev];
+        updated[historyPos] = { points: dupOrigPoints, paths };
+        return updated;
+      });
+      pushState({ points: currentPoints, paths });
+      // Keep dupNewPathIdx so the duplicate can be dragged again
       return;
     }
     if (dragIndex !== null && dragPreview !== null) {
@@ -1008,12 +1284,16 @@ function App() {
   const handleMouseLeave = () => {
     if (moveDragging) {
       setMoveDragging(false);
-      // Cancel: restore original points
       setHistory((prev) => {
         const updated = [...prev];
         updated[historyPos] = { points: moveOrigPoints, paths };
         return updated;
       });
+    }
+    if (dupDragging) {
+      // Don't cancel duplicate on leave — keep it where it is
+      setDupDragging(false);
+      setDupNewPathIdx(null);
     }
     if (dragIndex !== null) { setDragIndex(null); setDragPreview(null); }
     setIsPanning(false);
@@ -1101,6 +1381,7 @@ function App() {
     setSelectedIndex(null);
   };
 
+
   // --- Output ---
   const [convexity, setConvexity] = useState(() => paths[0]?.length >= 3 ? calcConvexity(state) : 1);
 
@@ -1149,15 +1430,29 @@ function App() {
               ? 'Click edge to insert point | Shift+drag point to move | Middle-mouse/Shift+click to pan | Scroll to zoom'
               : editMode === 'move'
                 ? 'Drag to move active path | Middle-mouse to pan | Scroll to zoom'
-                : editMode === 'angle'
-                  ? anglePoints.length < 3
-                    ? 'Click 3 points: A, B (vertex), C | Middle-mouse to pan'
-                    : 'Enter angle and press Apply or Enter | Click to re-select'
-                  : distPoint === null
-                    ? 'Click a point to select it | Middle-mouse to pan | Scroll to zoom'
-                    : distEdge === null
-                      ? 'Click an edge to measure distance | Click another point to re-select'
-                      : 'Enter distance and press Apply or Enter | Click to re-select'}
+                : editMode === 'moveAll'
+                  ? 'Drag to move all paths together | Middle-mouse to pan | Scroll to zoom'
+                  : editMode === 'duplicate'
+                    ? 'Drag to move active path | Click "Duplicate" to copy | Shift+click to pan'
+                  : editMode === 'angle'
+                    ? anglePoints.length < 3
+                      ? 'Click 3 points: A, B (vertex), C | Middle-mouse to pan'
+                      : 'Enter angle and press Apply or Enter | Click to re-select'
+                    : editMode === 'length'
+                      ? lengthEdge === null
+                        ? 'Click an edge to select it | Middle-mouse to pan'
+                        : 'Enter length and press Apply or Enter | Click another edge'
+                      : editMode === 'parallel'
+                        ? parallelBase === null
+                          ? 'Click the base edge (reference) | Middle-mouse to pan'
+                          : parallelTarget === null
+                            ? 'Click the target edge (to rotate) | Click to re-select base'
+                            : 'Click Make Parallel to apply | Click to re-select'
+                        : distPoint === null
+                          ? 'Click a point to select it | Middle-mouse to pan | Scroll to zoom'
+                          : distEdge === null
+                            ? 'Click an edge to measure distance | Click another point to re-select'
+                            : 'Enter distance and press Apply or Enter | Click to re-select'}
           </div>
         </div>
         <div className="sidebar">
@@ -1192,24 +1487,44 @@ function App() {
           <div className="mode-toolbar">
             <button
               className={`mode-btn ${editMode === 'normal' ? 'active' : ''}`}
-              onClick={() => { setEditMode('normal'); setDistPoint(null); setDistEdge(null); setAnglePoints([]); }}
+              onClick={() => { setEditMode('normal'); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
               title="Normal editing mode"
             >Edit</button>
             <button
               className={`mode-btn ${editMode === 'distance' ? 'active' : ''}`}
-              onClick={() => { setEditMode('distance'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); }}
+              onClick={() => { setEditMode('distance'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
               title="Set point distance from a line"
             >Distance</button>
             <button
               className={`mode-btn ${editMode === 'move' ? 'active' : ''}`}
-              onClick={() => { setEditMode('move'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); }}
-              title="Drag to move entire active path"
+              onClick={() => { setEditMode('move'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
+              title="Drag to move active path only"
             >Move</button>
             <button
+              className={`mode-btn ${editMode === 'moveAll' ? 'active' : ''}`}
+              onClick={() => { setEditMode('moveAll'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
+              title="Drag to move all paths together"
+            >Move All</button>
+            <button
               className={`mode-btn ${editMode === 'angle' ? 'active' : ''}`}
-              onClick={() => { setEditMode('angle'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); }}
+              onClick={() => { setEditMode('angle'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
               title="Set angle between two edges at a vertex"
             >Angle</button>
+            <button
+              className={`mode-btn ${editMode === 'length' ? 'active' : ''}`}
+              onClick={() => { setEditMode('length'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
+              title="Set edge length"
+            >Length</button>
+            <button
+              className={`mode-btn ${editMode === 'parallel' ? 'active' : ''}`}
+              onClick={() => { setEditMode('parallel'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
+              title="Make an edge parallel to another"
+            >Parallel</button>
+            <button
+              className={`mode-btn ${editMode === 'duplicate' ? 'active' : ''}`}
+              onClick={() => { setEditMode('duplicate'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
+              title="Click to duplicate active path, then drag to place"
+            >Duplicate</button>
           </div>
 
           {editMode === 'distance' && (
@@ -1283,6 +1598,100 @@ function App() {
             </div>
           )}
 
+          {editMode === 'length' && (
+            <div className="distance-panel">
+              <div className="distance-steps">
+                <div className={`distance-step ${lengthEdge === null ? 'current' : 'done'}`}>
+                  1. Click an edge {lengthEdge !== null && lengthInfo && <span className="step-done">— {lengthInfo.gi1}→{lengthInfo.gi2}</span>}
+                </div>
+              </div>
+              {lengthInfo && (
+                <div className="distance-input-row">
+                  <label>Length:</label>
+                  <input
+                    type="number"
+                    className="distance-input"
+                    value={lengthValue}
+                    min="0.001"
+                    step="1"
+                    onChange={(e) => setLengthValue(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') applyLength(); }}
+                  />
+                  <button className="apply-btn" onClick={applyLength}>Apply</button>
+                </div>
+              )}
+              {lengthInfo && (
+                <div className="distance-current">
+                  Current: {Math.round(lengthInfo.length * 1000) / 1000} (moves pt {lengthInfo.gi2})
+                </div>
+              )}
+            </div>
+          )}
+
+          {editMode === 'parallel' && (
+            <div className="distance-panel">
+              <div className="distance-steps">
+                <div className={`distance-step ${parallelBase === null ? 'current' : 'done'}`}>
+                  1. Click base edge {parallelBase !== null && (() => {
+                    const p = paths[parallelBase[0]];
+                    return p ? <span className="step-done">— {p[parallelBase[1]]}→{p[(parallelBase[1] + 1) % p.length]}</span> : null;
+                  })()}
+                </div>
+                <div className={`distance-step ${parallelBase !== null && parallelTarget === null ? 'current' : parallelTarget !== null ? 'done' : ''}`}>
+                  2. Click target edge {parallelTarget !== null && (() => {
+                    const p = paths[parallelTarget[0]];
+                    return p ? <span className="step-done">— {p[parallelTarget[1]]}→{p[(parallelTarget[1] + 1) % p.length]}</span> : null;
+                  })()}
+                </div>
+              </div>
+              {parallelInfo && (
+                <>
+                  <button className="apply-btn" style={{ width: '100%' }} onClick={applyParallel}>Make Parallel</button>
+                  <div className="distance-current">
+                    Base angle: {Math.round(parallelInfo.baseAngle * 180 / Math.PI * 10) / 10}°,
+                    Target angle: {Math.round(parallelInfo.targetAngle * 180 / Math.PI * 10) / 10}°
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {editMode === 'duplicate' && (
+            <div className="distance-panel">
+              <div className="distance-current" style={{ marginBottom: 6 }}>
+                Active: <strong>{getPathName(activePath)}</strong> ({(paths[activePath] || []).length} pts)
+              </div>
+              <button
+                className="apply-btn"
+                style={{ width: '100%' }}
+                onClick={() => {
+                  const srcPath = paths[activePath];
+                  if (!srcPath || srcPath.length === 0) return;
+                  const base = points.length;
+                  const newPoints: Point[] = [...points];
+                  const newPathIndices: number[] = [];
+                  for (let i = 0; i < srcPath.length; i++) {
+                    const p = points[srcPath[i]];
+                    newPoints.push([p[0], p[1]]);
+                    newPathIndices.push(base + i);
+                  }
+                  const newPaths = [...paths, newPathIndices];
+                  const newIdx = newPaths.length - 1;
+                  pushState({ points: newPoints, paths: newPaths });
+                  setPathName(newIdx, getPathName(activePath) + ' copy');
+                  setActivePath(newIdx);
+                  setSelectedIndex(null);
+                  setDupNewPathIdx(newIdx);
+                }}
+              >Duplicate "{getPathName(activePath)}"</button>
+              {dupNewPathIdx !== null && dupNewPathIdx < paths.length && (
+                <div className="distance-current" style={{ marginTop: 4 }}>
+                  Last duplicate: <strong>{getPathName(dupNewPathIdx)}</strong>
+                </div>
+              )}
+            </div>
+          )}
+
           <h2>Paths</h2>
           <div className="path-list">
             {paths.map((_, pi) => {
@@ -1294,7 +1703,21 @@ function App() {
                   onClick={() => { setActivePath(pi); setSelectedIndex(null); }}
                 >
                   <span className="path-color-dot" style={{ background: color.stroke }} />
-                  <span className="path-name">{pi === 0 ? 'Outer' : `Hole ${pi}`}</span>
+                  {editingPathName === pi ? (
+                    <input
+                      className="path-name-input"
+                      autoFocus
+                      defaultValue={getPathName(pi)}
+                      onClick={(e) => e.stopPropagation()}
+                      onBlur={(e) => { setPathName(pi, e.target.value || getPathName(pi)); setEditingPathName(null); }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') { setPathName(pi, (e.target as HTMLInputElement).value || getPathName(pi)); setEditingPathName(null); }
+                        if (e.key === 'Escape') setEditingPathName(null);
+                      }}
+                    />
+                  ) : (
+                    <span className="path-name" onDoubleClick={(e) => { e.stopPropagation(); setEditingPathName(pi); }}>{getPathName(pi)}</span>
+                  )}
                   <span className="path-count">{paths[pi].length} pts</span>
                   {pi > 0 && (
                     <button className="remove-btn" onClick={(e) => { e.stopPropagation(); removeHole(pi); }}
@@ -1306,7 +1729,7 @@ function App() {
             <button className="add-hole-btn" onClick={addHole}>+ Add Hole</button>
           </div>
 
-          <h2>Points — {paths[activePath] ? (activePath === 0 ? 'Outer' : `Hole ${activePath}`) : ''} ({activeIndices.length})</h2>
+          <h2>Points — {getPathName(activePath)} ({activeIndices.length})</h2>
           <div className="point-list">
             {activeIndices.map((gi, posInPath) => {
               const p = points[gi];
@@ -1317,7 +1740,32 @@ function App() {
                   onClick={() => setSelectedIndex(gi === selectedIndex ? null : gi)}
                 >
                   <span className="point-index">{gi}</span>
-                  <span className="point-coords">[{p[0]}, {p[1]}]</span>
+                  <input
+                    type="number"
+                    className="point-coord-input"
+                    value={p[0]}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value);
+                      if (isNaN(val)) return;
+                      const newPoints = [...points];
+                      newPoints[gi] = [val, p[1]];
+                      pushState({ points: newPoints, paths });
+                    }}
+                  />
+                  <input
+                    type="number"
+                    className="point-coord-input"
+                    value={p[1]}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value);
+                      if (isNaN(val)) return;
+                      const newPoints = [...points];
+                      newPoints[gi] = [p[0], val];
+                      pushState({ points: newPoints, paths });
+                    }}
+                  />
                   <button className="move-btn" disabled={posInPath === 0}
                     onClick={(e) => { e.stopPropagation(); movePointInPath(gi, -1); }} title="Move up">^</button>
                   <button className="move-btn" disabled={posInPath === activeIndices.length - 1}
@@ -1340,6 +1788,34 @@ function App() {
             value={openscadOutput}
             onClick={(e) => (e.target as HTMLTextAreaElement).select()}
           />
+          <button className="import-toggle-btn" onClick={() => setShowImport(!showImport)}>
+            {showImport ? '▾ Hide Import' : '▸ Import from OpenSCAD'}
+          </button>
+          {showImport && (
+            <div className="import-panel">
+              <textarea
+                className="import-textarea"
+                placeholder="Paste polygon(points=..., paths=...) here"
+                value={importText}
+                onChange={(e) => setImportText(e.target.value)}
+              />
+              <button
+                className="apply-btn"
+                onClick={() => {
+                  const parsed = parseOpenSCAD(importText);
+                  if (parsed) {
+                    pushState(parsed);
+                    setActivePath(0);
+                    setSelectedIndex(null);
+                    setImportText('');
+                    setShowImport(false);
+                  } else {
+                    alert('Could not parse OpenSCAD polygon. Expected: polygon(points=[[x,y],...], paths=[[0,1,2],...])');
+                  }
+                }}
+              >Load</button>
+            </div>
+          )}
           <div className="history-section">
             <h2>History ({historyPos + 1} / {history.length})</h2>
             <div className="history-controls">
