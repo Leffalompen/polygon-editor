@@ -5,7 +5,7 @@ A browser-based visual editor for creating 2D polygons with hole support, design
 ### web page available
 https://leffalompen.github.io/polygon-editor/
 
-Example make a freesbe:
+Example make a frisbee:
 ```
 $fs = 1;
 $fa = 1;
@@ -134,7 +134,7 @@ The output panel shows the `polygon()` call ready to paste into OpenSCAD:
 polygon(points=[[0,0],[50,0],[25,40]], paths=[[0,1,2]]);
 ```
 
-### or the freesbe
+### or the frisbee
 ```
 polygon(points=[[0,17],[87,10],[39,23],[70,23],[91,14],[0,23],[91,0],[93,7],[82,19],[89,0],[71,17],[80,14],[89,5]], paths=[[0,10,11,1,12,9,6,7,4,8,3,2,5]], convexity=3);
 ```
