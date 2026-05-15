@@ -308,6 +308,8 @@ function App() {
   const [polyOpacity, setPolyOpacity] = useState(0.35);
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState('');
+  const [showAngles, setShowAngles] = useState(false);
+  const [showLengths, setShowLengths] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -968,7 +970,75 @@ function App() {
       if (parallelBase !== null) drawEdgeHighlight(parallelBase, '#44ff44', 'base');
       if (parallelTarget !== null) drawEdgeHighlight(parallelTarget, '#ff44ff', 'target');
     }
-  }, [getPathPoints, points, paths, selectedIndex, activePath, dragIndex, dragPreview, offset, scale, toCanvas, canvasSize, bgImage, imageOpacity, polyOpacity, editMode, distPoint, distEdge, anglePoints, angleInfo, lengthEdge, lengthInfo, parallelBase, parallelTarget]);
+
+    // Show all edge lengths overlay
+    if (showLengths) {
+      ctx.font = 'bold 11px monospace';
+      for (let pi = 0; pi < paths.length; pi++) {
+        const path = paths[pi];
+        if (!path || path.length < 2) continue;
+        const color = PATH_COLORS[pi % PATH_COLORS.length].stroke;
+        ctx.fillStyle = color;
+        for (let ei = 0; ei < path.length; ei++) {
+          const gi1 = path[ei];
+          const gi2 = path[(ei + 1) % path.length];
+          const a = points[gi1], b = points[gi2];
+          if (!a || !b) continue;
+          const len = Math.round(Math.hypot(b[0] - a[0], b[1] - a[1]) * 100) / 100;
+          const [ax, ay] = toCanvas(a[0], a[1]);
+          const [bx, by] = toCanvas(b[0], b[1]);
+          const mx = (ax + bx) / 2;
+          const my = (ay + by) / 2;
+          // offset label perpendicular to edge
+          const edx = bx - ax, edy = by - ay;
+          const elen = Math.hypot(edx, edy) || 1;
+          const nx = -edy / elen * 12, ny = edx / elen * 12;
+          ctx.fillText(String(len), mx + nx, my + ny);
+        }
+      }
+    }
+
+    // Show all angles overlay
+    if (showAngles) {
+      ctx.font = 'bold 10px monospace';
+      for (let pi = 0; pi < paths.length; pi++) {
+        const path = paths[pi];
+        if (!path || path.length < 3) continue;
+        const color = PATH_COLORS[pi % PATH_COLORS.length].stroke;
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        for (let i = 0; i < path.length; i++) {
+          const prevIdx = path[(i - 1 + path.length) % path.length];
+          const curIdx = path[i];
+          const nextIdx = path[(i + 1) % path.length];
+          const prev = points[prevIdx], cur = points[curIdx], next = points[nextIdx];
+          if (!prev || !cur || !next) continue;
+          // Interior angle at cur between prev-cur-next
+          const ax = prev[0] - cur[0], ay = prev[1] - cur[1];
+          const bx = next[0] - cur[0], by = next[1] - cur[1];
+          const dot = ax * bx + ay * by;
+          const cross = ax * by - ay * bx;
+          const angle = Math.abs(Math.atan2(cross, dot)) * 180 / Math.PI;
+          const [cx2, cy2] = toCanvas(cur[0], cur[1]);
+          // Draw small arc
+          // Canvas angles: note Y is flipped in our toCanvas
+          const aAngle = Math.atan2(-(prev[1] - cur[1]), prev[0] - cur[0]);
+          const bAngle = Math.atan2(-(next[1] - cur[1]), next[0] - cur[0]);
+          ctx.beginPath();
+          const r = 18;
+          if (cross >= 0) {
+            ctx.arc(cx2, cy2, r, bAngle, aAngle);
+          } else {
+            ctx.arc(cx2, cy2, r, aAngle, bAngle);
+          }
+          ctx.lineWidth = 1;
+          ctx.stroke();
+          const midA = (aAngle + bAngle) / 2 + (cross >= 0 ? 0 : Math.PI);
+          ctx.fillText(`${Math.round(angle * 10) / 10}°`, cx2 + 22 * Math.cos(midA), cy2 + 22 * Math.sin(midA));
+        }
+      }
+    }
+  }, [getPathPoints, points, paths, selectedIndex, activePath, dragIndex, dragPreview, offset, scale, toCanvas, canvasSize, bgImage, imageOpacity, polyOpacity, editMode, distPoint, distEdge, anglePoints, angleInfo, lengthEdge, lengthInfo, parallelBase, parallelTarget, showAngles, showLengths]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -1466,8 +1536,8 @@ function App() {
               style={{ display: 'none' }}
             />
             <div className="image-buttons">
-              <button onClick={() => fileInputRef.current?.click()}>Import Image</button>
-              {bgImage && <button onClick={() => setBgImage(null)} className="remove-btn">Remove</button>}
+              <button className="action-btn" onClick={() => fileInputRef.current?.click()}>Import Image</button>
+              {bgImage && <button onClick={() => setBgImage(null)} className="inline-btn">Remove</button>}
             </div>
             {bgImage && (
               <label className="slider-label">
@@ -1526,6 +1596,22 @@ function App() {
               title="Click to duplicate active path, then drag to place"
             >Duplicate</button>
           </div>
+          <div className="overlay-buttons">
+            <button
+              className={`action-btn${showAngles ? ' active' : ''}`}
+              onMouseDown={() => setShowAngles(true)}
+              onMouseUp={() => setShowAngles(false)}
+              onMouseLeave={() => setShowAngles(false)}
+              title="Hold to show all angles"
+            >Angles</button>
+            <button
+              className={`action-btn${showLengths ? ' active' : ''}`}
+              onMouseDown={() => setShowLengths(true)}
+              onMouseUp={() => setShowLengths(false)}
+              onMouseLeave={() => setShowLengths(false)}
+              title="Hold to show all edge lengths"
+            >Lengths</button>
+          </div>
 
           {editMode === 'distance' && (
             <div className="distance-panel">
@@ -1549,7 +1635,7 @@ function App() {
                     onChange={(e) => setDistValue(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter') applyDistance(); }}
                   />
-                  <button className="apply-btn" onClick={applyDistance}>Apply</button>
+                  <button className="action-btn" onClick={applyDistance}>Apply</button>
                 </div>
               )}
               {distInfo && (
@@ -1587,7 +1673,7 @@ function App() {
                     onChange={(e) => setAngleValue(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter') applyAngle(); }}
                   />
-                  <button className="apply-btn" onClick={applyAngle}>Apply</button>
+                  <button className="action-btn" onClick={applyAngle}>Apply</button>
                 </div>
               )}
               {angleInfo && (
@@ -1617,7 +1703,7 @@ function App() {
                     onChange={(e) => setLengthValue(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter') applyLength(); }}
                   />
-                  <button className="apply-btn" onClick={applyLength}>Apply</button>
+                  <button className="action-btn" onClick={applyLength}>Apply</button>
                 </div>
               )}
               {lengthInfo && (
@@ -1646,7 +1732,7 @@ function App() {
               </div>
               {parallelInfo && (
                 <>
-                  <button className="apply-btn" style={{ width: '100%' }} onClick={applyParallel}>Make Parallel</button>
+                  <button className="action-btn" style={{ width: '100%' }} onClick={applyParallel}>Make Parallel</button>
                   <div className="distance-current">
                     Base angle: {Math.round(parallelInfo.baseAngle * 180 / Math.PI * 10) / 10}°,
                     Target angle: {Math.round(parallelInfo.targetAngle * 180 / Math.PI * 10) / 10}°
@@ -1662,7 +1748,7 @@ function App() {
                 Active: <strong>{getPathName(activePath)}</strong> ({(paths[activePath] || []).length} pts)
               </div>
               <button
-                className="apply-btn"
+                className="action-btn"
                 style={{ width: '100%' }}
                 onClick={() => {
                   const srcPath = paths[activePath];
@@ -1720,7 +1806,7 @@ function App() {
                   )}
                   <span className="path-count">{paths[pi].length} pts</span>
                   {pi > 0 && (
-                    <button className="remove-btn" onClick={(e) => { e.stopPropagation(); removeHole(pi); }}
+                    <button className="danger-btn" onClick={(e) => { e.stopPropagation(); removeHole(pi); }}
                       title="Remove hole">x</button>
                   )}
                 </div>
@@ -1766,11 +1852,11 @@ function App() {
                       pushState({ points: newPoints, paths });
                     }}
                   />
-                  <button className="move-btn" disabled={posInPath === 0}
+                  <button className="inline-btn" disabled={posInPath === 0}
                     onClick={(e) => { e.stopPropagation(); movePointInPath(gi, -1); }} title="Move up">^</button>
-                  <button className="move-btn" disabled={posInPath === activeIndices.length - 1}
+                  <button className="inline-btn" disabled={posInPath === activeIndices.length - 1}
                     onClick={(e) => { e.stopPropagation(); movePointInPath(gi, 1); }} title="Move down">v</button>
-                  <button className="remove-btn"
+                  <button className="danger-btn"
                     onClick={(e) => { e.stopPropagation(); removePoint(gi); }} title="Remove point">x</button>
                 </div>
               );
@@ -1779,7 +1865,7 @@ function App() {
           <div className="convexity-label">
             Convexity: <span className={convexity <= 1 ? 'convex' : 'concave'}>{convexity}</span>
             {convexity <= 1 ? ' (convex)' : ' (concave)'}
-            <button className="recalc-btn" onClick={recalcConvexity} title="Recalculate convexity">↻</button>
+            <button className="inline-btn" style={{ marginLeft: 'auto', fontSize: 14, padding: '2px 6px', lineHeight: 1 }} onClick={recalcConvexity} title="Recalculate convexity">↻</button>
           </div>
           <h2>OpenSCAD Output</h2>
           <textarea
@@ -1788,7 +1874,16 @@ function App() {
             value={openscadOutput}
             onClick={(e) => (e.target as HTMLTextAreaElement).select()}
           />
-          <button className="import-toggle-btn" onClick={() => setShowImport(!showImport)}>
+          <button
+            className="action-btn full-width"
+            onClick={() => {
+              navigator.clipboard.writeText(openscadOutput).then(() => {
+                const btn = document.querySelector('.action-btn.full-width') as HTMLButtonElement;
+                if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy to Clipboard'; }, 1500); }
+              });
+            }}
+          >Copy to Clipboard</button>
+          <button className="action-btn full-width" onClick={() => setShowImport(!showImport)}>
             {showImport ? '▾ Hide Import' : '▸ Import from OpenSCAD'}
           </button>
           {showImport && (
@@ -1800,7 +1895,7 @@ function App() {
                 onChange={(e) => setImportText(e.target.value)}
               />
               <button
-                className="apply-btn"
+                className="action-btn"
                 onClick={() => {
                   const parsed = parseOpenSCAD(importText);
                   if (parsed) {
@@ -1819,20 +1914,24 @@ function App() {
           <div className="history-section">
             <h2>History ({historyPos + 1} / {history.length})</h2>
             <div className="history-controls">
-              <button disabled={historyPos === 0} onClick={undo} title="Undo (Ctrl+Z)">Undo</button>
-              <button disabled={historyPos === history.length - 1} onClick={redo} title="Redo (Ctrl+Y)">Redo</button>
+              <button className="action-btn" style={{ flex: 1 }} disabled={historyPos === 0} onClick={undo} title="Undo (Ctrl+Z)">Undo</button>
+              <button className="action-btn" style={{ flex: 1 }} disabled={historyPos === history.length - 1} onClick={redo} title="Redo (Ctrl+Y)">Redo</button>
             </div>
             <div className="history-list">
-              {history.map((entry, i) => (
+              {[...history].map((_, i) => {
+                const ri = history.length - 1 - i;
+                const e = history[ri];
+                return (
                 <div
-                  key={i}
-                  className={`history-item ${i === historyPos ? 'active' : ''} ${i > historyPos ? 'future' : ''}`}
-                  onClick={() => jumpTo(i)}
+                  key={ri}
+                  className={`history-item ${ri === historyPos ? 'active' : ''} ${ri > historyPos ? 'future' : ''}`}
+                  onClick={() => jumpTo(ri)}
                 >
-                  <span className="history-index">{i + 1}</span>
-                  <span className="history-summary">{entry.paths.length === 1 ? `${entry.points.length} pts` : `${entry.paths.length} paths, ${entry.points.length} pts`}</span>
+                  <span className="history-index">{ri + 1}</span>
+                  <span className="history-summary">{e.paths.length === 1 ? `${e.points.length} pts` : `${e.paths.length} paths, ${e.points.length} pts`}</span>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>

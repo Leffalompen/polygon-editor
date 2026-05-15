@@ -75,22 +75,6 @@ canvas {
   margin-bottom: 6px;
 }
 
-.image-buttons button {
-  padding: 4px 10px;
-  background: #2a2a4a;
-  border: 1px solid #555;
-  color: #ccc;
-  border-radius: 3px;
-  cursor: pointer;
-  font-family: monospace;
-  font-size: 12px;
-}
-
-.image-buttons button:hover {
-  background: #44aaff;
-  color: #fff;
-}
-
 .slider-label {
   display: block;
   font-size: 11px;
@@ -140,6 +124,13 @@ canvas {
   border-color: #44aaff;
   color: #fff;
   font-weight: bold;
+}
+
+.overlay-buttons {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+  flex-shrink: 0;
 }
 
 .distance-panel {
@@ -205,7 +196,8 @@ canvas {
   outline: none;
 }
 
-.apply-btn {
+/* --- Primary action button (Apply, Copy, Duplicate, Import, Load Image) --- */
+.action-btn {
   padding: 4px 10px;
   background: #1a3a5a;
   border: 1px solid #44aaff;
@@ -216,8 +208,18 @@ canvas {
   font-size: 12px;
 }
 
-.apply-btn:hover {
+.action-btn:hover:not(:disabled) {
   background: #2a4a6a;
+}
+
+.action-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.action-btn.full-width {
+  width: 100%;
+  margin-top: 4px;
 }
 
 .distance-current {
@@ -353,7 +355,8 @@ canvas {
   outline: none;
 }
 
-.move-btn {
+/* --- Small inline utility button (reorder, recalc, remove image) --- */
+.inline-btn {
   background: transparent;
   border: 1px solid #555;
   color: #aaa;
@@ -364,17 +367,18 @@ canvas {
   font-family: monospace;
 }
 
-.move-btn:hover:not(:disabled) {
+.inline-btn:hover:not(:disabled) {
   background: #44aaff;
   color: #fff;
 }
 
-.move-btn:disabled {
+.inline-btn:disabled {
   opacity: 0.3;
   cursor: default;
 }
 
-.remove-btn {
+/* --- Destructive button (remove hole, remove point) --- */
+.danger-btn {
   background: transparent;
   border: 1px solid #555;
   color: #f66;
@@ -385,7 +389,7 @@ canvas {
   font-family: monospace;
 }
 
-.remove-btn:hover {
+.danger-btn:hover {
   background: #f66;
   color: #fff;
 }
@@ -401,22 +405,6 @@ canvas {
   display: flex;
   align-items: center;
   gap: 6px;
-}
-
-.recalc-btn {
-  margin-left: auto;
-  background: #2a2a4a;
-  border: 1px solid #444;
-  border-radius: 3px;
-  color: #44aaff;
-  cursor: pointer;
-  font-size: 14px;
-  padding: 2px 6px;
-  line-height: 1;
-}
-
-.recalc-btn:hover {
-  background: #3a3a5a;
 }
 
 .convex {
@@ -442,25 +430,6 @@ canvas {
   font-size: 13px;
   resize: vertical;
   flex-shrink: 0;
-}
-
-.import-toggle-btn {
-  width: 100%;
-  padding: 4px;
-  background: transparent;
-  border: 1px solid #333;
-  border-radius: 3px;
-  color: #888;
-  cursor: pointer;
-  font-family: monospace;
-  font-size: 11px;
-  text-align: left;
-  margin-top: 4px;
-}
-
-.import-toggle-btn:hover {
-  color: #44aaff;
-  border-color: #44aaff;
 }
 
 .import-panel {
@@ -498,28 +467,6 @@ canvas {
   display: flex;
   gap: 8px;
   margin-bottom: 4px;
-}
-
-.history-controls button {
-  flex: 1;
-  padding: 4px 0;
-  background: #2a2a4a;
-  border: 1px solid #555;
-  color: #ccc;
-  border-radius: 3px;
-  cursor: pointer;
-  font-family: monospace;
-  font-size: 12px;
-}
-
-.history-controls button:hover:not(:disabled) {
-  background: #44aaff;
-  color: #fff;
-}
-
-.history-controls button:disabled {
-  opacity: 0.3;
-  cursor: default;
 }
 
 .history-list {
