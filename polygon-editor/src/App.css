@@ -296,8 +296,13 @@ canvas {
   font-size: 12px;
 }
 
-.add-hole-btn:hover {
+.add-hole-btn:hover:not(:disabled) {
   background: #3a3a5a;
+}
+
+.add-hole-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
 }
 
 .point-list {
@@ -389,9 +394,14 @@ canvas {
   font-family: monospace;
 }
 
-.danger-btn:hover {
+.danger-btn:hover:not(:disabled) {
   background: #f66;
   color: #fff;
+}
+
+.danger-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
 }
 
 .convexity-label {

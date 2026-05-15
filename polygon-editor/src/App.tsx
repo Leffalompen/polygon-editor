@@ -3,23 +3,27 @@ import './App.css';
 
 type Point = [number, number];
 
+interface PathDef {
+  name: string;
+  indices: number[];
+}
+
 /** All points in a flat list; paths index into them. paths[0] = outer, paths[1+] = holes */
 interface PolyState {
   points: Point[];
-  paths: number[][];
+  paths: PathDef[];
 }
 
 const GRID_SIZE = 1;
 const GRID_MAJOR = 10;
 const INITIAL_SCALE = 4;
 const MAX_HISTORY = 50;
-const STORAGE_KEY = 'polygon-editor-history-v2';
-const STORAGE_POS_KEY = 'polygon-editor-history-pos-v2';
-const STORAGE_NAMES_KEY = 'polygon-editor-path-names-v2';
+const STORAGE_KEY = 'polygon-editor-history-v3';
+const STORAGE_POS_KEY = 'polygon-editor-history-pos-v3';
 const POINT_HIT_RADIUS = 10;
 const EDGE_HIT_RADIUS = 8;
 
-type EditMode = 'normal' | 'distance' | 'move' | 'moveAll' | 'angle' | 'length' | 'parallel' | 'duplicate';
+type EditMode = 'normal' | 'distance' | 'move' | 'moveAll' | 'angle' | 'length' | 'parallel' | 'duplicate' | 'view';
 
 /** Signed distance from point P to the infinite line through A→B.
  *  Positive = left side of A→B, negative = right side. */
@@ -53,7 +57,7 @@ const PATH_COLORS = [
 
 const DEFAULT_STATE: PolyState = {
   points: [[0, 0], [50, 0], [25, 40]],
-  paths: [[0, 1, 2]],
+  paths: [{ name: 'Outer', indices: [0, 1, 2] }],
 };
 
 function loadHistory(): { entries: PolyState[]; pos: number } {
@@ -64,6 +68,32 @@ function loadHistory(): { entries: PolyState[]; pos: number } {
       const entries = JSON.parse(raw) as PolyState[];
       const pos = rawPos !== null ? Number(rawPos) : entries.length - 1;
       if (entries.length > 0 && pos >= 0 && pos < entries.length && entries[0].paths) {
+        return { entries, pos };
+      }
+    }
+  } catch { /* ignore */ }
+  // Migrate from v2 format
+  try {
+    const rawV2 = localStorage.getItem('polygon-editor-history-v2');
+    const rawPosV2 = localStorage.getItem('polygon-editor-history-pos-v2');
+    const rawNames = localStorage.getItem('polygon-editor-path-names-v2');
+    if (rawV2) {
+      const v2Entries = JSON.parse(rawV2) as { points: Point[]; paths: number[][] }[];
+      const names: string[] = rawNames ? JSON.parse(rawNames) : [];
+      const entries: PolyState[] = v2Entries.map((e) => ({
+        points: e.points,
+        paths: e.paths.map((indices, pi) => ({
+          name: names[pi] || (pi === 0 ? 'Outer' : `Hole ${pi}`),
+          indices,
+        })),
+      }));
+      const pos = rawPosV2 !== null ? Number(rawPosV2) : entries.length - 1;
+      if (entries.length > 0 && pos >= 0 && pos < entries.length) {
+        // Save as v3 and clean up v2
+        saveHistory(entries, pos);
+        localStorage.removeItem('polygon-editor-history-v2');
+        localStorage.removeItem('polygon-editor-history-pos-v2');
+        localStorage.removeItem('polygon-editor-path-names-v2');
         return { entries, pos };
       }
     }
@@ -82,7 +112,8 @@ function calcConvexity(state: PolyState): number {
   const { points, paths } = state;
   // Collect all edges across all paths
   const edges: [Point, Point][] = [];
-  for (const path of paths) {
+  for (const pathDef of paths) {
+    const path = pathDef.indices;
     for (let i = 0; i < path.length; i++) {
       const j = (i + 1) % path.length;
       edges.push([points[path[i]], points[path[j]]]);
@@ -177,14 +208,17 @@ function parseOpenSCAD(text: string): PolyState | null {
     }
     // Extract paths (optional)
     const pathsMatch = text.match(/paths\s*=\s*(\[[\s\S]*?\])\s*[,)]/);
-    let paths: number[][];
+    let rawPaths: number[][];
     if (pathsMatch) {
-      paths = JSON.parse(pathsMatch[1]);
-      if (!Array.isArray(paths) || paths.length === 0) return null;
+      rawPaths = JSON.parse(pathsMatch[1]);
+      if (!Array.isArray(rawPaths) || rawPaths.length === 0) return null;
     } else {
-      paths = [points.map((_, i) => i)];
+      rawPaths = [points.map((_, i) => i)];
     }
-    return { points: points.map(p => [p[0], p[1]] as Point), paths };
+    return {
+      points: points.map(p => [p[0], p[1]] as Point),
+      paths: rawPaths.map((indices, pi) => ({ name: pi === 0 ? 'Outer' : `Hole ${pi}`, indices })),
+    };
   } catch {
     return null;
   }
@@ -213,24 +247,20 @@ function App() {
   // Selected point index (global index into points[])
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
 
-  // Path names (stored separately, not in undo history)
-  const [pathNames, setPathNames] = useState<string[]>(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_NAMES_KEY);
-      if (raw) return JSON.parse(raw);
-    } catch { /* ignore */ }
-    return [];
-  });
+  // Path names: derived from paths[i].name
   const [editingPathName, setEditingPathName] = useState<number | null>(null);
 
-  const getPathName = (pi: number) => pathNames[pi] || (pi === 0 ? 'Outer' : `Hole ${pi}`);
+  const getPathName = (pi: number) => paths[pi]?.name || (pi === 0 ? 'Outer' : `Hole ${pi}`);
 
   const setPathName = (pi: number, name: string) => {
-    const updated = [...pathNames];
-    while (updated.length <= pi) updated.push('');
-    updated[pi] = name;
-    setPathNames(updated);
-    try { localStorage.setItem(STORAGE_NAMES_KEY, JSON.stringify(updated)); } catch { /* */ }
+    const newPaths = paths.map((p, i) => i === pi ? { ...p, name } : p);
+    // Update current history entry in-place (name change is part of state)
+    setHistory((prev) => {
+      const updated = [...prev];
+      updated[historyPos] = { points, paths: newPaths };
+      saveHistory(updated, historyPos);
+      return updated;
+    });
   };
 
   // Editing mode
@@ -356,25 +386,25 @@ function App() {
 
   // Get points for a specific path, with drag preview applied
   const getPathPoints = useCallback((pathIdx: number): Point[] => {
-    const path = paths[pathIdx];
-    if (!path) return [];
-    return path.map((gi) => {
+    const pathDef = paths[pathIdx];
+    if (!pathDef) return [];
+    return pathDef.indices.map((gi) => {
       if (dragIndex === gi && dragPreview !== null) return dragPreview;
       return points[gi];
     });
   }, [points, paths, dragIndex, dragPreview]);
 
   // Active path's global indices
-  const activePathIndices = paths[activePath] || [];
+  const activePathIndices = paths[activePath]?.indices || [];
 
   // Compute current distance for distance mode
   const distInfo = (() => {
     if (distPoint === null || distEdge === null) return null;
     const [pi, ei] = distEdge;
-    const path = paths[pi];
-    if (!path || ei >= path.length) return null;
-    const gi1 = path[ei];
-    const gi2 = path[(ei + 1) % path.length];
+    const pathDef = paths[pi];
+    if (!pathDef || ei >= pathDef.indices.length) return null;
+    const gi1 = pathDef.indices[ei];
+    const gi2 = pathDef.indices[(ei + 1) % pathDef.indices.length];
     const a = points[gi1];
     const b = points[gi2];
     const p = points[distPoint];
@@ -475,10 +505,10 @@ function App() {
   const lengthInfo = (() => {
     if (lengthEdge === null) return null;
     const [pi, ei] = lengthEdge;
-    const path = paths[pi];
-    if (!path || ei >= path.length) return null;
-    const gi1 = path[ei];
-    const gi2 = path[(ei + 1) % path.length];
+    const pathDef = paths[pi];
+    if (!pathDef || ei >= pathDef.indices.length) return null;
+    const gi1 = pathDef.indices[ei];
+    const gi2 = pathDef.indices[(ei + 1) % pathDef.indices.length];
     const a = points[gi1];
     const b = points[gi2];
     if (!a || !b) return null;
@@ -518,8 +548,8 @@ function App() {
     const bPath = paths[bpi];
     const tPath = paths[tpi];
     if (!bPath || !tPath) return null;
-    const bgi1 = bPath[bei], bgi2 = bPath[(bei + 1) % bPath.length];
-    const tgi1 = tPath[tei], tgi2 = tPath[(tei + 1) % tPath.length];
+    const bgi1 = bPath.indices[bei], bgi2 = bPath.indices[(bei + 1) % bPath.indices.length];
+    const tgi1 = tPath.indices[tei], tgi2 = tPath.indices[(tei + 1) % tPath.indices.length];
     const ba = points[bgi1], bb = points[bgi2];
     const ta = points[tgi1], tb = points[tgi2];
     if (!ba || !bb || !ta || !tb) return null;
@@ -573,8 +603,8 @@ function App() {
     // Then check all other paths
     for (let pi = 0; pi < paths.length; pi++) {
       if (pi === activePath) continue;
-      for (let k = paths[pi].length - 1; k >= 0; k--) {
-        const gi = paths[pi][k];
+      for (let k = paths[pi].indices.length - 1; k >= 0; k--) {
+        const gi = paths[pi].indices[k];
         const [px, py] = toCanvas(points[gi][0], points[gi][1]);
         if (Math.hypot(cx - px, cy - py) <= POINT_HIT_RADIUS) return gi;
       }
@@ -605,7 +635,7 @@ function App() {
     let bestDist = Infinity;
     let bestResult: [number, number] | null = null;
     for (let pi = 0; pi < paths.length; pi++) {
-      const path = paths[pi];
+      const path = paths[pi].indices;
       if (path.length < 2) continue;
       for (let i = 0; i < path.length; i++) {
         const j = (i + 1) % path.length;
@@ -782,7 +812,7 @@ function App() {
 
     // Draw all points
     for (let pi = 0; pi < paths.length; pi++) {
-      const path = paths[pi];
+      const path = paths[pi].indices;
       const color = PATH_COLORS[pi % PATH_COLORS.length];
       const isActivePath = pi === activePath;
       for (let k = 0; k < path.length; k++) {
@@ -830,10 +860,10 @@ function App() {
       // Highlight selected edge
       if (distEdge !== null) {
         const [pi, ei] = distEdge;
-        const path = paths[pi];
-        if (path) {
-          const gi1 = path[ei];
-          const gi2 = path[(ei + 1) % path.length];
+        const pathDef = paths[pi];
+        if (pathDef) {
+          const gi1 = pathDef.indices[ei];
+          const gi2 = pathDef.indices[(ei + 1) % pathDef.indices.length];
           const a = points[gi1];
           const b = points[gi2];
           if (a && b) {
@@ -954,10 +984,10 @@ function App() {
     if (editMode === 'parallel') {
       const drawEdgeHighlight = (edge: [number, number], color: string, label: string) => {
         const [pi, ei] = edge;
-        const path = paths[pi];
-        if (!path) return;
-        const gi1 = path[ei];
-        const gi2 = path[(ei + 1) % path.length];
+        const pathDef = paths[pi];
+        if (!pathDef) return;
+        const gi1 = pathDef.indices[ei];
+        const gi2 = pathDef.indices[(ei + 1) % pathDef.indices.length];
         const a = points[gi1], b = points[gi2];
         if (!a || !b) return;
         const [ax, ay] = toCanvas(a[0], a[1]);
@@ -975,8 +1005,8 @@ function App() {
     if (showLengths) {
       ctx.font = 'bold 11px monospace';
       for (let pi = 0; pi < paths.length; pi++) {
-        const path = paths[pi];
-        if (!path || path.length < 2) continue;
+        const path = paths[pi].indices;
+        if (path.length < 2) continue;
         const color = PATH_COLORS[pi % PATH_COLORS.length].stroke;
         ctx.fillStyle = color;
         for (let ei = 0; ei < path.length; ei++) {
@@ -1002,8 +1032,8 @@ function App() {
     if (showAngles) {
       ctx.font = 'bold 10px monospace';
       for (let pi = 0; pi < paths.length; pi++) {
-        const path = paths[pi];
-        if (!path || path.length < 3) continue;
+        const path = paths[pi].indices;
+        if (path.length < 3) continue;
         const color = PATH_COLORS[pi % PATH_COLORS.length].stroke;
         ctx.strokeStyle = color;
         ctx.fillStyle = color;
@@ -1044,12 +1074,13 @@ function App() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (editMode === 'view') return;
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
       else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [undo, redo]);
+  }, [undo, redo, editMode]);
 
   // --- Mouse handlers ---
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1060,6 +1091,10 @@ function App() {
     if (e.button === 1) {
       setIsPanning(true); setPanStart([e.clientX, e.clientY]); setOffsetStart([...offset]); e.preventDefault(); return;
     }
+    if (editMode === 'view') {
+      if (e.button === 0 && e.shiftKey) { setIsPanning(true); setPanStart([e.clientX, e.clientY]); setOffsetStart([...offset]); e.preventDefault(); }
+      return;
+    }
     if (e.button !== 0) return;
 
     // Pan with shift+click on empty space (shared across modes)
@@ -1068,7 +1103,7 @@ function App() {
       if (hitPt !== null) {
         setDragIndex(hitPt); setDragPreview(points[hitPt]); setSelectedIndex(hitPt);
         for (let pi = 0; pi < paths.length; pi++) {
-          if (paths[pi].includes(hitPt)) { setActivePath(pi); break; }
+          if (paths[pi].indices.includes(hitPt)) { setActivePath(pi); break; }
         }
         e.preventDefault(); return;
       }
@@ -1116,7 +1151,7 @@ function App() {
         if (hitEdgeResult !== null) {
           // Don't allow selecting an edge that contains the selected point
           const [pi, ei] = hitEdgeResult;
-          const path = paths[pi];
+          const path = paths[pi].indices;
           const gi1 = path[ei];
           const gi2 = path[(ei + 1) % path.length];
           if (gi1 !== distPoint && gi2 !== distPoint) {
@@ -1135,7 +1170,7 @@ function App() {
       const hitEdgeResult = hitTestEdgeAny(cx, cy);
       if (hitEdgeResult !== null) {
         const [pi, ei] = hitEdgeResult;
-        const path = paths[pi];
+        const path = paths[pi].indices;
         const gi1 = path[ei];
         const gi2 = path[(ei + 1) % path.length];
         if (gi1 !== distPoint && gi2 !== distPoint) {
@@ -1225,10 +1260,10 @@ function App() {
       const newGlobalIdx = points.length;
       const newPoints = [...points, [wx, wy] as Point];
       const newPaths = paths.map((p, pi) => {
-        if (pi !== activePath) return [...p];
-        const np = [...p];
+        if (pi !== activePath) return { ...p, indices: [...p.indices] };
+        const np = [...p.indices];
         np.splice(hitEdge + 1, 0, newGlobalIdx);
-        return np;
+        return { ...p, indices: np };
       });
       pushState({ points: newPoints, paths: newPaths });
       setSelectedIndex(newGlobalIdx);
@@ -1240,7 +1275,7 @@ function App() {
     if (hitPt !== null) {
       setSelectedIndex(hitPt === selectedIndex ? null : hitPt);
       for (let pi = 0; pi < paths.length; pi++) {
-        if (paths[pi].includes(hitPt)) { setActivePath(pi); break; }
+        if (paths[pi].indices.includes(hitPt)) { setActivePath(pi); break; }
       }
       return;
     }
@@ -1257,7 +1292,7 @@ function App() {
       const dx = wx - moveStart[0];
       const dy = wy - moveStart[1];
       const newPoints = moveOrigPoints.map((p, gi) => {
-        if (editMode === 'moveAll' || (paths[activePath] || []).includes(gi)) {
+        if (editMode === 'moveAll' || (paths[activePath]?.indices || []).includes(gi)) {
           return [p[0] + dx, p[1] + dy] as Point;
         }
         return p;
@@ -1274,7 +1309,7 @@ function App() {
       const [wx, wy] = toWorld(e.clientX - rect.left, e.clientY - rect.top);
       const dx = wx - dupStart[0];
       const dy = wy - dupStart[1];
-      const pathIndices = paths[activePath] || [];
+      const pathIndices = paths[activePath]?.indices || [];
       const newPoints = [...dupOrigPoints];
       for (const gi of pathIndices) {
         if (dupOrigPoints[gi]) {
@@ -1385,18 +1420,18 @@ function App() {
     // Find which path owns this point
     let ownerPath = -1;
     for (let pi = 0; pi < paths.length; pi++) {
-      if (paths[pi].includes(globalIdx)) { ownerPath = pi; break; }
+      if (paths[pi].indices.includes(globalIdx)) { ownerPath = pi; break; }
     }
     if (ownerPath < 0) return;
 
     const newPaths = paths.map((p, pi) => {
-      if (pi !== ownerPath) return [...p];
-      return p.filter((gi) => gi !== globalIdx);
+      if (pi !== ownerPath) return { ...p, indices: [...p.indices] };
+      return { ...p, indices: p.indices.filter((gi) => gi !== globalIdx) };
     });
     // Don't allow removing a path's last 3 points for outer, or last 3 for a hole
-    if (ownerPath === 0 && newPaths[0].length < 3) return;
+    if (ownerPath === 0 && newPaths[0].indices.length < 3) return;
     // If a hole goes below 3 points, remove the whole hole path
-    if (ownerPath > 0 && newPaths[ownerPath].length < 3) {
+    if (ownerPath > 0 && newPaths[ownerPath].indices.length < 3) {
       newPaths.splice(ownerPath, 1);
       if (activePath >= newPaths.length) setActivePath(Math.max(0, newPaths.length - 1));
     }
@@ -1408,18 +1443,18 @@ function App() {
     let ownerPath = -1;
     let posInPath = -1;
     for (let pi = 0; pi < paths.length; pi++) {
-      const idx = paths[pi].indexOf(globalIdx);
+      const idx = paths[pi].indices.indexOf(globalIdx);
       if (idx >= 0) { ownerPath = pi; posInPath = idx; break; }
     }
     if (ownerPath < 0) return;
-    const path = paths[ownerPath];
+    const pathIndices = paths[ownerPath].indices;
     const target = posInPath + direction;
-    if (target < 0 || target >= path.length) return;
+    if (target < 0 || target >= pathIndices.length) return;
     const newPaths = paths.map((p, pi) => {
-      if (pi !== ownerPath) return [...p];
-      const np = [...p];
+      if (pi !== ownerPath) return { ...p, indices: [...p.indices] };
+      const np = [...p.indices];
       [np[posInPath], np[target]] = [np[target], np[posInPath]];
-      return np;
+      return { ...p, indices: np };
     });
     pushState({ points: [...points], paths: newPaths });
     setSelectedIndex(globalIdx);
@@ -1427,7 +1462,7 @@ function App() {
 
   const addHole = () => {
     // Place a small triangle hole near the center of the outer path
-    const outerPts = (paths[0] || []).map((gi) => points[gi]);
+    const outerPts = (paths[0]?.indices || []).map((gi) => points[gi]);
     let cx = 25, cy = 20;
     if (outerPts.length >= 3) {
       cx = outerPts.reduce((s, p) => s + p[0], 0) / outerPts.length;
@@ -1437,7 +1472,7 @@ function App() {
     cy = Math.round(cy / GRID_MAJOR) * GRID_MAJOR;
     const base = points.length;
     const newPoints: Point[] = [...points, [cx - 5, cy - 5], [cx + 5, cy - 5], [cx, cy + 5]];
-    const newPaths = [...paths, [base, base + 1, base + 2]];
+    const newPaths = [...paths, { name: `Hole ${paths.length}`, indices: [base, base + 1, base + 2] }];
     pushState({ points: newPoints, paths: newPaths });
     setActivePath(newPaths.length - 1);
     setSelectedIndex(null);
@@ -1453,32 +1488,39 @@ function App() {
 
 
   // --- Output ---
-  const [convexity, setConvexity] = useState(() => paths[0]?.length >= 3 ? calcConvexity(state) : 1);
+  const [convexity, setConvexity] = useState(() => paths[0]?.indices.length >= 3 ? calcConvexity(state) : 1);
 
   // Auto-recalculate convexity when state changes
   useEffect(() => {
-    setConvexity(paths[0]?.length >= 3 ? calcConvexity(state) : 1);
+    setConvexity(paths[0]?.indices.length >= 3 ? calcConvexity(state) : 1);
   }, [state]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const recalcConvexity = useCallback(() => {
-    setConvexity(paths[0]?.length >= 3 ? calcConvexity(state) : 1);
+    setConvexity(paths[0]?.indices.length >= 3 ? calcConvexity(state) : 1);
   }, [state, paths]);
 
   const openscadOutput = (() => {
-    const ptsStr = `[${points.map((p) => `[${p[0]},${p[1]}]`).join(',')}]`;
+    // Collect only referenced points and re-index
+    const usedSet = new Set<number>();
+    for (const p of paths) for (const gi of p.indices) usedSet.add(gi);
+    const usedIndices = [...usedSet].sort((a, b) => a - b);
+    const reindex = new Map<number, number>();
+    usedIndices.forEach((gi, newIdx) => reindex.set(gi, newIdx));
+    const usedPoints = usedIndices.map((gi) => points[gi]);
+    const ptsStr = `[${usedPoints.map((p) => `[${p[0]},${p[1]}]`).join(',')}]`;
+    const remappedPaths = paths.map((p) => p.indices.map((gi) => reindex.get(gi)!));
+    const pathsStr = `[${remappedPaths.map((p) => `[${p.join(',')}]`).join(',')}]`;
     const hasHoles = paths.length > 1;
-    const pathsStr = `[${paths.map((p) => `[${p.join(',')}]`).join(',')}]`;
-    if (hasHoles) {
+    // Always include paths= to preserve winding order
+    if (hasHoles || convexity > 1) {
       return `polygon(points=${ptsStr}, paths=${pathsStr}, convexity=${convexity});`;
     }
-    if (convexity > 1) {
-      return `polygon(points=${ptsStr}, convexity=${convexity});`;
-    }
-    return `polygon(points=${ptsStr});`;
+    return `polygon(points=${ptsStr}, paths=${pathsStr});`;
   })();
 
   // Active path's points for the sidebar list
-  const activeIndices = paths[activePath] || [];
+  const activeIndices = paths[activePath]?.indices || [];
+  const isView = editMode === 'view';
 
   return (
     <div className="app">
@@ -1496,7 +1538,9 @@ function App() {
             onWheel={handleWheel}
           />
           <div className="canvas-hint">
-            {editMode === 'normal'
+            {editMode === 'view'
+              ? 'View only — shift+click to pan | Scroll to zoom'
+              : editMode === 'normal'
               ? 'Click edge to insert point | Shift+drag point to move | Middle-mouse/Shift+click to pan | Scroll to zoom'
               : editMode === 'move'
                 ? 'Drag to move active path | Middle-mouse to pan | Scroll to zoom'
@@ -1536,8 +1580,8 @@ function App() {
               style={{ display: 'none' }}
             />
             <div className="image-buttons">
-              <button className="action-btn" onClick={() => fileInputRef.current?.click()}>Import Image</button>
-              {bgImage && <button onClick={() => setBgImage(null)} className="inline-btn">Remove</button>}
+              <button className="action-btn" disabled={isView} onClick={() => fileInputRef.current?.click()}>Import Image</button>
+              {bgImage && <button onClick={() => setBgImage(null)} className="inline-btn" disabled={isView}>Remove</button>}
             </div>
             {bgImage && (
               <label className="slider-label">
@@ -1557,59 +1601,66 @@ function App() {
           <div className="mode-toolbar">
             <button
               className={`mode-btn ${editMode === 'normal' ? 'active' : ''}`}
-              onClick={() => { setEditMode('normal'); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
+              onClick={() => { setEditMode('normal'); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); setShowAngles(false); setShowLengths(false); }}
               title="Normal editing mode"
             >Edit</button>
             <button
               className={`mode-btn ${editMode === 'distance' ? 'active' : ''}`}
-              onClick={() => { setEditMode('distance'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
+              onClick={() => { setEditMode('distance'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); setShowAngles(false); setShowLengths(false); }}
               title="Set point distance from a line"
             >Distance</button>
             <button
               className={`mode-btn ${editMode === 'move' ? 'active' : ''}`}
-              onClick={() => { setEditMode('move'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
+              onClick={() => { setEditMode('move'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); setShowAngles(false); setShowLengths(false); }}
               title="Drag to move active path only"
             >Move</button>
             <button
               className={`mode-btn ${editMode === 'moveAll' ? 'active' : ''}`}
-              onClick={() => { setEditMode('moveAll'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
+              onClick={() => { setEditMode('moveAll'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); setShowAngles(false); setShowLengths(false); }}
               title="Drag to move all paths together"
             >Move All</button>
             <button
               className={`mode-btn ${editMode === 'angle' ? 'active' : ''}`}
-              onClick={() => { setEditMode('angle'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
+              onClick={() => { setEditMode('angle'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); setShowAngles(false); setShowLengths(false); }}
               title="Set angle between two edges at a vertex"
             >Angle</button>
             <button
               className={`mode-btn ${editMode === 'length' ? 'active' : ''}`}
-              onClick={() => { setEditMode('length'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
+              onClick={() => { setEditMode('length'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); setShowAngles(false); setShowLengths(false); }}
               title="Set edge length"
             >Length</button>
             <button
               className={`mode-btn ${editMode === 'parallel' ? 'active' : ''}`}
-              onClick={() => { setEditMode('parallel'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
+              onClick={() => { setEditMode('parallel'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); setShowAngles(false); setShowLengths(false); }}
               title="Make an edge parallel to another"
             >Parallel</button>
             <button
               className={`mode-btn ${editMode === 'duplicate' ? 'active' : ''}`}
-              onClick={() => { setEditMode('duplicate'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); }}
+              onClick={() => { setEditMode('duplicate'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); setShowAngles(false); setShowLengths(false); }}
               title="Click to duplicate active path, then drag to place"
             >Duplicate</button>
+            <button
+              className={`mode-btn ${editMode === 'view' ? 'active' : ''}`}
+              onClick={() => { setEditMode('view'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); setShowAngles(true); setShowLengths(true); }}
+              title="View only — no editing, shows angles and lengths"
+            >View</button>
           </div>
           <div className="overlay-buttons">
             <button
               className={`action-btn${showAngles ? ' active' : ''}`}
-              onMouseDown={() => setShowAngles(true)}
-              onMouseUp={() => setShowAngles(false)}
-              onMouseLeave={() => setShowAngles(false)}
-              title="Hold to show all angles"
+              {...(editMode === 'view'
+                ? { onClick: () => setShowAngles(!showAngles) }
+                : { onMouseDown: () => setShowAngles(true), onMouseUp: () => setShowAngles(false), onMouseLeave: () => setShowAngles(false) }
+              )}
+              title={editMode === 'view' ? 'Toggle angles' : 'Hold to show all angles'}
             >Angles</button>
             <button
               className={`action-btn${showLengths ? ' active' : ''}`}
-              onMouseDown={() => setShowLengths(true)}
-              onMouseUp={() => setShowLengths(false)}
-              onMouseLeave={() => setShowLengths(false)}
-              title="Hold to show all edge lengths"
+              {...(editMode === 'view'
+                ? { onClick: () => setShowLengths(!showLengths) }
+                : { onMouseDown: () => setShowLengths(true), onMouseUp: () => setShowLengths(false), onMouseLeave: () => setShowLengths(false) }
+              )}
+              title={editMode === 'view' ? 'Toggle lengths' : 'Hold to show all edge lengths'}
             >Lengths</button>
           </div>
 
@@ -1620,7 +1671,7 @@ function App() {
                   1. Click a point {distPoint !== null && <span className="step-done">— pt {distPoint}</span>}
                 </div>
                 <div className={`distance-step ${distPoint !== null && distEdge === null ? 'current' : distEdge !== null ? 'done' : ''}`}>
-                  2. Click an edge {distEdge !== null && <span className="step-done">— edge {paths[distEdge[0]][distEdge[1]]}→{paths[distEdge[0]][(distEdge[1] + 1) % paths[distEdge[0]].length]}</span>}
+                  2. Click an edge {distEdge !== null && <span className="step-done">— edge {paths[distEdge[0]].indices[distEdge[1]]}→{paths[distEdge[0]].indices[(distEdge[1] + 1) % paths[distEdge[0]].indices.length]}</span>}
                 </div>
               </div>
               {distInfo && (
@@ -1719,13 +1770,13 @@ function App() {
               <div className="distance-steps">
                 <div className={`distance-step ${parallelBase === null ? 'current' : 'done'}`}>
                   1. Click base edge {parallelBase !== null && (() => {
-                    const p = paths[parallelBase[0]];
+                    const p = paths[parallelBase[0]]?.indices;
                     return p ? <span className="step-done">— {p[parallelBase[1]]}→{p[(parallelBase[1] + 1) % p.length]}</span> : null;
                   })()}
                 </div>
                 <div className={`distance-step ${parallelBase !== null && parallelTarget === null ? 'current' : parallelTarget !== null ? 'done' : ''}`}>
                   2. Click target edge {parallelTarget !== null && (() => {
-                    const p = paths[parallelTarget[0]];
+                    const p = paths[parallelTarget[0]]?.indices;
                     return p ? <span className="step-done">— {p[parallelTarget[1]]}→{p[(parallelTarget[1] + 1) % p.length]}</span> : null;
                   })()}
                 </div>
@@ -1745,13 +1796,13 @@ function App() {
           {editMode === 'duplicate' && (
             <div className="distance-panel">
               <div className="distance-current" style={{ marginBottom: 6 }}>
-                Active: <strong>{getPathName(activePath)}</strong> ({(paths[activePath] || []).length} pts)
+                Active: <strong>{getPathName(activePath)}</strong> ({(paths[activePath]?.indices || []).length} pts)
               </div>
               <button
                 className="action-btn"
                 style={{ width: '100%' }}
                 onClick={() => {
-                  const srcPath = paths[activePath];
+                  const srcPath = paths[activePath]?.indices;
                   if (!srcPath || srcPath.length === 0) return;
                   const base = points.length;
                   const newPoints: Point[] = [...points];
@@ -1761,10 +1812,9 @@ function App() {
                     newPoints.push([p[0], p[1]]);
                     newPathIndices.push(base + i);
                   }
-                  const newPaths = [...paths, newPathIndices];
+                  const newPaths = [...paths, { name: getPathName(activePath) + ' copy', indices: newPathIndices }];
                   const newIdx = newPaths.length - 1;
                   pushState({ points: newPoints, paths: newPaths });
-                  setPathName(newIdx, getPathName(activePath) + ' copy');
                   setActivePath(newIdx);
                   setSelectedIndex(null);
                   setDupNewPathIdx(newIdx);
@@ -1804,15 +1854,15 @@ function App() {
                   ) : (
                     <span className="path-name" onDoubleClick={(e) => { e.stopPropagation(); setEditingPathName(pi); }}>{getPathName(pi)}</span>
                   )}
-                  <span className="path-count">{paths[pi].length} pts</span>
+                  <span className="path-count">{paths[pi].indices.length} pts</span>
                   {pi > 0 && (
-                    <button className="danger-btn" onClick={(e) => { e.stopPropagation(); removeHole(pi); }}
+                    <button className="danger-btn" disabled={isView} onClick={(e) => { e.stopPropagation(); removeHole(pi); }}
                       title="Remove hole">x</button>
                   )}
                 </div>
               );
             })}
-            <button className="add-hole-btn" onClick={addHole}>+ Add Hole</button>
+            <button className="add-hole-btn" disabled={isView} onClick={addHole}>+ Add Hole</button>
           </div>
 
           <h2>Points — {getPathName(activePath)} ({activeIndices.length})</h2>
@@ -1830,6 +1880,7 @@ function App() {
                     type="number"
                     className="point-coord-input"
                     value={p[0]}
+                    disabled={isView}
                     onClick={(e) => e.stopPropagation()}
                     onChange={(e) => {
                       const val = parseFloat(e.target.value);
@@ -1843,6 +1894,7 @@ function App() {
                     type="number"
                     className="point-coord-input"
                     value={p[1]}
+                    disabled={isView}
                     onClick={(e) => e.stopPropagation()}
                     onChange={(e) => {
                       const val = parseFloat(e.target.value);
@@ -1852,11 +1904,11 @@ function App() {
                       pushState({ points: newPoints, paths });
                     }}
                   />
-                  <button className="inline-btn" disabled={posInPath === 0}
+                  <button className="inline-btn" disabled={isView || posInPath === 0}
                     onClick={(e) => { e.stopPropagation(); movePointInPath(gi, -1); }} title="Move up">^</button>
-                  <button className="inline-btn" disabled={posInPath === activeIndices.length - 1}
+                  <button className="inline-btn" disabled={isView || posInPath === activeIndices.length - 1}
                     onClick={(e) => { e.stopPropagation(); movePointInPath(gi, 1); }} title="Move down">v</button>
-                  <button className="danger-btn"
+                  <button className="danger-btn" disabled={isView}
                     onClick={(e) => { e.stopPropagation(); removePoint(gi); }} title="Remove point">x</button>
                 </div>
               );
@@ -1883,7 +1935,7 @@ function App() {
               });
             }}
           >Copy to Clipboard</button>
-          <button className="action-btn full-width" onClick={() => setShowImport(!showImport)}>
+          <button className="action-btn full-width" disabled={isView} onClick={() => setShowImport(!showImport)}>
             {showImport ? '▾ Hide Import' : '▸ Import from OpenSCAD'}
           </button>
           {showImport && (
@@ -1914,8 +1966,8 @@ function App() {
           <div className="history-section">
             <h2>History ({historyPos + 1} / {history.length})</h2>
             <div className="history-controls">
-              <button className="action-btn" style={{ flex: 1 }} disabled={historyPos === 0} onClick={undo} title="Undo (Ctrl+Z)">Undo</button>
-              <button className="action-btn" style={{ flex: 1 }} disabled={historyPos === history.length - 1} onClick={redo} title="Redo (Ctrl+Y)">Redo</button>
+              <button className="action-btn" style={{ flex: 1 }} disabled={isView || historyPos === 0} onClick={undo} title="Undo (Ctrl+Z)">Undo</button>
+              <button className="action-btn" style={{ flex: 1 }} disabled={isView || historyPos === history.length - 1} onClick={redo} title="Redo (Ctrl+Y)">Redo</button>
             </div>
             <div className="history-list">
               {[...history].map((_, i) => {
@@ -1925,7 +1977,7 @@ function App() {
                 <div
                   key={ri}
                   className={`history-item ${ri === historyPos ? 'active' : ''} ${ri > historyPos ? 'future' : ''}`}
-                  onClick={() => jumpTo(ri)}
+                  onClick={() => !isView && jumpTo(ri)}
                 >
                   <span className="history-index">{ri + 1}</span>
                   <span className="history-summary">{e.paths.length === 1 ? `${e.points.length} pts` : `${e.paths.length} paths, ${e.points.length} pts`}</span>

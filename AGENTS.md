@@ -17,14 +17,16 @@ No routing, no backend, no state library. Single React component.
 ## Data Model
 
 ```ts
-type PolyState = { points: Point[], paths: number[][] }
+interface PathDef { name: string; indices: number[] }
+type PolyState = { points: Point[], paths: PathDef[] }
 ```
 
 - `points` — flat array of `[x, y]` shared across all paths (matches OpenSCAD format)
-- `paths[0]` — outer shape (indices into `points`)
-- `paths[1+]` — holes (indices into `points`)
-- Stored in localStorage under key `polygon-editor-history-v2` (50-entry undo history)
-- Path names stored separately in `polygon-editor-path-names-v2` (not part of undo history)
+- `paths[0]` — outer shape (`{ name, indices }` where indices reference `points`)
+- `paths[1+]` — holes (`{ name, indices }`)
+- Path names are part of the state and included in undo history
+- Stored in localStorage under key `polygon-editor-history-v3` (50-entry undo history)
+- Automatic migration from v2 format on first load
 
 ## Commands
 
