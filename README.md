@@ -5,6 +5,16 @@ A browser-based visual editor for creating 2D polygons with hole support, design
 ### web page available
 https://leffalompen.github.io/polygon-editor/
 
+Example make a freesbe:
+```
+$fs = 1;
+$fa = 1;
+translate([0,0,23])
+rotate([180,0,0])
+rotate_extrude(angle=360)    
+polygon(points=[[0,17],[87,10],[39,23],[70,23],[91,14],[0,23],[91,0],[93,7],[82,19],[89,0],[71,17],[80,14],[89,5]], paths=[[0,10,11,1,12,9,6,7,4,8,3,2,5]], convexity=3);
+```
+
 ## Getting Started
 
 ```bash
