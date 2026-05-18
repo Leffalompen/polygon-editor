@@ -7,6 +7,8 @@ https://leffalompen.github.io/polygon-editor/
 
 ## Example make a frisbee:
 
+![Example image](./polygon-editor.png "Example")
+
 ### Output from polygon-editor:
 ```
 polygon(points=[[0,17],[87,10],[39,23],[70,23],[91,14],[0,23],[91,0],[93,7],[82,19],[89,0],[71,17],[80,14],[89,5]], paths=[[0,10,11,1,12,9,6,7,4,8,3,2,5]], convexity=3);
