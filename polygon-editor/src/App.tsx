@@ -1039,7 +1039,7 @@ function App() {
 
     // Show all edge lengths overlay
     if (showLengths) {
-      ctx.font = 'bold 11px monospace';
+      ctx.font = editMode === 'view' ? 'bold 14px monospace' : 'bold 13px monospace';
       for (let pi = 0; pi < paths.length; pi++) {
         const path = paths[pi].indices;
         if (path.length < 2) continue;
@@ -1066,7 +1066,7 @@ function App() {
 
     // Show all angles overlay
     if (showAngles) {
-      ctx.font = 'bold 10px monospace';
+      ctx.font = editMode === 'view' ? 'bold 13px monospace' : 'bold 12px monospace';
       for (let pi = 0; pi < paths.length; pi++) {
         const path = paths[pi].indices;
         if (path.length < 3) continue;
