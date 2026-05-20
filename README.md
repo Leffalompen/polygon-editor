@@ -104,6 +104,25 @@ Create a copy of the active path:
 
 The copy gets new points (independent of the original) and can be repositioned by dragging. Any active path can be dragged in this mode.
 
+### Rotate
+Rotate the active path around a pivot point:
+1. Click to set the pivot (snaps to an existing point if near, otherwise uses the clicked position)
+2. Drag to rotate the path freely around the pivot
+3. Release to commit
+
+Use the "Reset Pivot" button to clear the pivot and pick a new one.
+
+### Rotate All
+Same as Rotate, but rotates all points in all paths around the pivot.
+
+### Simplify
+A read-only mode (no point insertion or movement) for cleaning up the data:
+
+- **Reorder Points** — renumbers points sequentially per path (path 0 gets indices 0, 1, 2..., path 1 continues from there, etc.)
+- **Round** — rounds all point coordinates to the specified number of decimal places (default: 1). Does not add decimals to numbers that already have fewer.
+
+Both operations are undoable.
+
 ### View
 A read-only mode that displays all angles and edge lengths on the canvas. No editing is possible. Useful for reviewing your shape.
 
@@ -170,6 +189,7 @@ Click "Import Image" to load a PNG or JPEG as a tracing reference. Adjust opacit
 - **Undo**: Ctrl+Z or click Undo
 - **Redo**: Ctrl+Y or click Redo
 - Click any entry in the history list to jump to that state
+- Each entry shows a short description (e.g. "Point added", "Rotated", "Set length")
 - History is stored in localStorage (up to 50 entries)
 - Path names are part of the undo history
 

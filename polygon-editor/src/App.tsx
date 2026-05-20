@@ -12,6 +12,7 @@ interface PathDef {
 interface PolyState {
   points: Point[];
   paths: PathDef[];
+  label?: string;
 }
 
 const GRID_SIZE = 1;
@@ -23,7 +24,7 @@ const STORAGE_POS_KEY = 'polygon-editor-history-pos-v3';
 const POINT_HIT_RADIUS = 10;
 const EDGE_HIT_RADIUS = 8;
 
-type EditMode = 'normal' | 'distance' | 'move' | 'moveAll' | 'angle' | 'length' | 'parallel' | 'duplicate' | 'view';
+type EditMode = 'normal' | 'distance' | 'move' | 'moveAll' | 'angle' | 'length' | 'parallel' | 'duplicate' | 'view' | 'rotate' | 'rotateAll' | 'simplify';
 
 /** Signed distance from point P to the infinite line through A→B.
  *  Positive = left side of A→B, negative = right side. */
@@ -293,10 +294,20 @@ function App() {
   const [dupOrigPoints, setDupOrigPoints] = useState<Point[]>([]);
   const [dupNewPathIdx, setDupNewPathIdx] = useState<number | null>(null); // index of the newly created path
 
-  const pushState = useCallback((next: PolyState) => {
+  // Rotate mode state
+  const [rotatePivot, setRotatePivot] = useState<Point | null>(null); // world coords of pivot
+  const [rotateDragging, setRotateDragging] = useState(false);
+  const [rotateStartAngle, setRotateStartAngle] = useState(0); // angle of mouse at drag start
+  const [rotateOrigPoints, setRotateOrigPoints] = useState<Point[]>([]);
+
+  // Simplify mode state
+  const [simplifyDecimals, setSimplifyDecimals] = useState(1);
+
+  const pushState = useCallback((next: PolyState, label?: string) => {
+    const entry = label ? { ...next, label } : next;
     setHistory((prev) => {
       const trimmed = prev.slice(0, historyPos + 1);
-      const updated = [...trimmed, next].slice(-MAX_HISTORY);
+      const updated = [...trimmed, entry].slice(-MAX_HISTORY);
       const newPos = updated.length - 1;
       setHistoryPos(newPos);
       saveHistory(updated, newPos);
@@ -384,6 +395,15 @@ function App() {
     [offset, scale]
   );
 
+  const toWorldRaw = useCallback(
+    (cx: number, cy: number): [number, number] => {
+      const wx = (cx - offset[0]) / scale;
+      const wy = (offset[1] - cy) / scale;
+      return [wx, wy];
+    },
+    [offset, scale]
+  );
+
   // Get points for a specific path, with drag preview applied
   const getPathPoints = useCallback((pathIdx: number): Point[] => {
     const pathDef = paths[pathIdx];
@@ -447,7 +467,7 @@ function App() {
     if (finalX === p[0] && finalY === p[1]) return;
     const newPoints = [...points];
     newPoints[distPoint] = [finalX, finalY];
-    pushState({ points: newPoints, paths });
+    pushState({ points: newPoints, paths }, 'Set distance');
   }, [distPoint, distEdge, distInfo, distValue, points, paths, pushState]);
 
   // Angle mode: compute current angle at B between edges BA and BC (in degrees)
@@ -498,7 +518,7 @@ function App() {
     if (newCx === c[0] && newCy === c[1]) return;
     const newPoints = [...points];
     newPoints[ci] = [newCx, newCy];
-    pushState({ points: newPoints, paths });
+    pushState({ points: newPoints, paths }, 'Set angle');
   }, [anglePoints, angleInfo, angleValue, points, paths, pushState]);
 
   // Length mode: compute current edge length
@@ -537,7 +557,7 @@ function App() {
     if (newBx === b[0] && newBy === b[1]) return;
     const newPoints = [...points];
     newPoints[gi2] = [newBx, newBy];
-    pushState({ points: newPoints, paths });
+    pushState({ points: newPoints, paths }, 'Set length');
   }, [lengthEdge, lengthInfo, lengthValue, points, paths, pushState]);
 
   // Parallel mode: compute info
@@ -589,7 +609,7 @@ function App() {
     const newPoints = [...points];
     newPoints[tgi1] = newA;
     newPoints[tgi2] = newB;
-    pushState({ points: newPoints, paths });
+    pushState({ points: newPoints, paths }, 'Make parallel');
   }, [parallelInfo, points, paths, pushState]);
 
   // Hit test: find global point index under cursor (across all paths)
@@ -1001,6 +1021,22 @@ function App() {
       if (parallelTarget !== null) drawEdgeHighlight(parallelTarget, '#ff44ff', 'target');
     }
 
+    // Rotate mode: draw pivot point
+    if ((editMode === 'rotate' || editMode === 'rotateAll') && rotatePivot) {
+      const [px, py] = toCanvas(rotatePivot[0], rotatePivot[1]);
+      // Crosshair
+      ctx.strokeStyle = '#ff44ff';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(px - 12, py); ctx.lineTo(px + 12, py); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(px, py - 12); ctx.lineTo(px, py + 12); ctx.stroke();
+      // Circle
+      ctx.beginPath(); ctx.arc(px, py, 8, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ff44ff'; ctx.lineWidth = 1.5; ctx.stroke();
+      // Label
+      ctx.fillStyle = '#ff44ff'; ctx.font = 'bold 10px monospace';
+      ctx.fillText('pivot', px + 12, py - 10);
+    }
+
     // Show all edge lengths overlay
     if (showLengths) {
       ctx.font = 'bold 11px monospace';
@@ -1068,7 +1104,7 @@ function App() {
         }
       }
     }
-  }, [getPathPoints, points, paths, selectedIndex, activePath, dragIndex, dragPreview, offset, scale, toCanvas, canvasSize, bgImage, imageOpacity, polyOpacity, editMode, distPoint, distEdge, anglePoints, angleInfo, lengthEdge, lengthInfo, parallelBase, parallelTarget, showAngles, showLengths]);
+  }, [getPathPoints, points, paths, selectedIndex, activePath, dragIndex, dragPreview, offset, scale, toCanvas, canvasSize, bgImage, imageOpacity, polyOpacity, editMode, distPoint, distEdge, anglePoints, angleInfo, lengthEdge, lengthInfo, parallelBase, parallelTarget, showAngles, showLengths, rotatePivot]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -1114,7 +1150,7 @@ function App() {
       setIsPanning(true); setPanStart([e.clientX, e.clientY]); setOffsetStart([...offset]); e.preventDefault(); return;
     }
 
-    if (e.shiftKey && (editMode === 'move' || editMode === 'moveAll' || editMode === 'duplicate')) {
+    if (e.shiftKey && (editMode === 'move' || editMode === 'moveAll' || editMode === 'duplicate' || editMode === 'rotate' || editMode === 'rotateAll' || editMode === 'simplify')) {
       setIsPanning(true); setPanStart([e.clientX, e.clientY]); setOffsetStart([...offset]); e.preventDefault(); return;
     }
 
@@ -1192,6 +1228,27 @@ function App() {
       return;
     }
 
+    // Rotate / Rotate All mode: first click sets pivot, subsequent drag rotates
+    if (editMode === 'rotate' || editMode === 'rotateAll') {
+      if (rotatePivot === null) {
+        // Set pivot: snap to existing point if close, otherwise use world coords
+        const hitPt = hitTestPoint(cx, cy);
+        if (hitPt !== null) {
+          setRotatePivot(points[hitPt]);
+        } else {
+          setRotatePivot(toWorld(cx, cy));
+        }
+      } else {
+        // Start rotation drag
+        const [wx, wy] = toWorldRaw(cx, cy);
+        const angle = Math.atan2(wy - rotatePivot[1], wx - rotatePivot[0]);
+        setRotateDragging(true);
+        setRotateStartAngle(angle);
+        setRotateOrigPoints([...points]);
+      }
+      return;
+    }
+
     // Length mode: select an edge
     if (editMode === 'length') {
       const hitEdgeResult = hitTestEdgeAny(cx, cy);
@@ -1254,6 +1311,7 @@ function App() {
     }
 
     // Normal mode: click on edge of active path to insert point
+    if (editMode !== 'normal') return;
     const hitEdge = hitTestEdge(cx, cy);
     if (hitEdge !== null) {
       const [wx, wy] = toWorld(cx, cy);
@@ -1265,7 +1323,7 @@ function App() {
         np.splice(hitEdge + 1, 0, newGlobalIdx);
         return { ...p, indices: np };
       });
-      pushState({ points: newPoints, paths: newPaths });
+      pushState({ points: newPoints, paths: newPaths }, 'Point added');
       setSelectedIndex(newGlobalIdx);
       return;
     }
@@ -1323,6 +1381,30 @@ function App() {
       });
       return;
     }
+    if (rotateDragging && rotatePivot) {
+      const rect = canvasRef.current!.getBoundingClientRect();
+      const [wx, wy] = toWorldRaw(e.clientX - rect.left, e.clientY - rect.top);
+      const currentAngle = Math.atan2(wy - rotatePivot[1], wx - rotatePivot[0]);
+      const deltaAngle = currentAngle - rotateStartAngle;
+      const cosA = Math.cos(deltaAngle);
+      const sinA = Math.sin(deltaAngle);
+      const px = rotatePivot[0], py = rotatePivot[1];
+      const activeIndicesSet = new Set(paths[activePath]?.indices || []);
+      const newPoints = rotateOrigPoints.map((p, gi) => {
+        if (editMode === 'rotateAll' || activeIndicesSet.has(gi)) {
+          const dx = p[0] - px;
+          const dy = p[1] - py;
+          return [px + dx * cosA - dy * sinA, py + dx * sinA + dy * cosA] as Point;
+        }
+        return p;
+      });
+      setHistory((prev) => {
+        const updated = [...prev];
+        updated[historyPos] = { points: newPoints, paths };
+        return updated;
+      });
+      return;
+    }
     if (dragIndex !== null) {
       const rect = canvasRef.current!.getBoundingClientRect();
       setDragPreview(toWorld(e.clientX - rect.left, e.clientY - rect.top));
@@ -1336,6 +1418,10 @@ function App() {
       canvas.style.cursor = moveDragging ? 'grabbing' : 'grab';
     } else if (editMode === 'duplicate') {
       canvas.style.cursor = dupDragging ? 'grabbing' : 'grab';
+    } else if (editMode === 'rotate' || editMode === 'rotateAll') {
+      if (rotateDragging) canvas.style.cursor = 'grabbing';
+      else if (rotatePivot === null) canvas.style.cursor = 'crosshair';
+      else canvas.style.cursor = 'grab';
     } else if (editMode === 'length' || editMode === 'parallel') {
       canvas.style.cursor = hitTestEdgeAny(cx, cy) !== null ? 'crosshair' : 'default';
     } else if (editMode === 'angle') {
@@ -1353,6 +1439,17 @@ function App() {
   };
 
   const handleMouseUp = () => {
+    if (rotateDragging) {
+      setRotateDragging(false);
+      const currentPoints = [...points];
+      setHistory((prev) => {
+        const updated = [...prev];
+        updated[historyPos] = { points: rotateOrigPoints, paths };
+        return updated;
+      });
+      pushState({ points: currentPoints, paths }, 'Rotated');
+      return;
+    }
     if (moveDragging) {
       setMoveDragging(false);
       const currentPoints = [...points];
@@ -1361,7 +1458,7 @@ function App() {
         updated[historyPos] = { points: moveOrigPoints, paths };
         return updated;
       });
-      pushState({ points: currentPoints, paths });
+      pushState({ points: currentPoints, paths }, editMode === 'moveAll' ? 'Moved all' : 'Moved path');
       return;
     }
     if (dupDragging) {
@@ -1372,14 +1469,14 @@ function App() {
         updated[historyPos] = { points: dupOrigPoints, paths };
         return updated;
       });
-      pushState({ points: currentPoints, paths });
+      pushState({ points: currentPoints, paths }, 'Placed duplicate');
       // Keep dupNewPathIdx so the duplicate can be dragged again
       return;
     }
     if (dragIndex !== null && dragPreview !== null) {
       const newPoints = [...points];
       newPoints[dragIndex] = dragPreview;
-      pushState({ points: newPoints, paths });
+      pushState({ points: newPoints, paths }, 'Point moved');
       setDragIndex(null); setDragPreview(null);
       return;
     }
@@ -1387,6 +1484,14 @@ function App() {
   };
 
   const handleMouseLeave = () => {
+    if (rotateDragging) {
+      setRotateDragging(false);
+      setHistory((prev) => {
+        const updated = [...prev];
+        updated[historyPos] = { points: rotateOrigPoints, paths };
+        return updated;
+      });
+    }
     if (moveDragging) {
       setMoveDragging(false);
       setHistory((prev) => {
@@ -1435,7 +1540,7 @@ function App() {
       newPaths.splice(ownerPath, 1);
       if (activePath >= newPaths.length) setActivePath(Math.max(0, newPaths.length - 1));
     }
-    pushState({ points: [...points], paths: newPaths });
+    pushState({ points: [...points], paths: newPaths }, 'Point removed');
     if (selectedIndex === globalIdx) setSelectedIndex(null);
   };
 
@@ -1456,7 +1561,7 @@ function App() {
       [np[posInPath], np[target]] = [np[target], np[posInPath]];
       return { ...p, indices: np };
     });
-    pushState({ points: [...points], paths: newPaths });
+    pushState({ points: [...points], paths: newPaths }, 'Point reordered');
     setSelectedIndex(globalIdx);
   };
 
@@ -1473,7 +1578,7 @@ function App() {
     const base = points.length;
     const newPoints: Point[] = [...points, [cx - 5, cy - 5], [cx + 5, cy - 5], [cx, cy + 5]];
     const newPaths = [...paths, { name: `Hole ${paths.length}`, indices: [base, base + 1, base + 2] }];
-    pushState({ points: newPoints, paths: newPaths });
+    pushState({ points: newPoints, paths: newPaths }, 'Hole added');
     setActivePath(newPaths.length - 1);
     setSelectedIndex(null);
   };
@@ -1481,7 +1586,7 @@ function App() {
   const removeHole = (pathIdx: number) => {
     if (pathIdx === 0) return; // can't remove outer
     const newPaths = paths.filter((_, i) => i !== pathIdx);
-    pushState({ points: [...points], paths: newPaths });
+    pushState({ points: [...points], paths: newPaths }, 'Hole removed');
     if (activePath >= newPaths.length) setActivePath(Math.max(0, newPaths.length - 1));
     setSelectedIndex(null);
   };
@@ -1640,11 +1745,79 @@ function App() {
               title="Click to duplicate active path, then drag to place"
             >Duplicate</button>
             <button
+              className={`mode-btn ${editMode === 'rotate' ? 'active' : ''}`}
+              onClick={() => { setEditMode('rotate'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); setShowAngles(false); setShowLengths(false); setRotatePivot(null); setRotateDragging(false); }}
+              title="Click to set pivot, then drag to rotate active path"
+            >Rotate</button>
+            <button
+              className={`mode-btn ${editMode === 'rotateAll' ? 'active' : ''}`}
+              onClick={() => { setEditMode('rotateAll'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); setShowAngles(false); setShowLengths(false); setRotatePivot(null); setRotateDragging(false); }}
+              title="Click to set pivot, then drag to rotate all paths"
+            >Rotate All</button>
+            <button
+              className={`mode-btn ${editMode === 'simplify' ? 'active' : ''}`}
+              onClick={() => { setEditMode('simplify'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); setShowAngles(false); setShowLengths(false); setRotatePivot(null); setRotateDragging(false); }}
+              title="Simplify point ordering to match polygon traversal order"
+            >Simplify</button>
+            <button
               className={`mode-btn ${editMode === 'view' ? 'active' : ''}`}
               onClick={() => { setEditMode('view'); setSelectedIndex(null); setDistPoint(null); setDistEdge(null); setAnglePoints([]); setLengthEdge(null); setParallelBase(null); setParallelTarget(null); setDupDragging(false); setShowAngles(true); setShowLengths(true); }}
               title="View only — no editing, shows angles and lengths"
             >View</button>
           </div>
+          {(editMode === 'rotate' || editMode === 'rotateAll') && rotatePivot && (
+            <button
+              className="action-btn"
+              onClick={() => { setRotatePivot(null); setRotateDragging(false); }}
+              title="Clear pivot to select a new one"
+            >Reset Pivot</button>
+          )}
+          {editMode === 'simplify' && (
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+              <button
+                className="action-btn"
+                onClick={() => {
+                  const newPoints: Point[] = [];
+                  const newPaths: PathDef[] = [];
+                  for (const path of paths) {
+                    const startIdx = newPoints.length;
+                    const newIndices: number[] = [];
+                    for (const idx of path.indices) {
+                      newPoints.push(points[idx]);
+                      newIndices.push(startIdx + newIndices.length);
+                    }
+                    newPaths.push({ name: path.name, indices: newIndices });
+                  }
+                  pushState({ points: newPoints, paths: newPaths }, 'Reordered points');
+                }}
+                title="Reorder points to match path traversal order"
+              >Reorder Points</button>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px' }}>
+                Decimals:
+                <input
+                  type="number"
+                  min={0}
+                  max={10}
+                  value={simplifyDecimals}
+                  onChange={(e) => setSimplifyDecimals(Math.max(0, Math.min(10, parseInt(e.target.value) || 0)))}
+                  style={{ width: '40px' }}
+                />
+              </label>
+              <button
+                className="action-btn"
+                onClick={() => {
+                  const factor = Math.pow(10, simplifyDecimals);
+                  const newPoints: Point[] = points.map(([x, y]) => {
+                    const rx = Math.round(x * factor) / factor;
+                    const ry = Math.round(y * factor) / factor;
+                    return [rx, ry] as Point;
+                  });
+                  pushState({ points: newPoints, paths }, 'Rounded coords');
+                }}
+                title="Round all point coordinates to the specified number of decimals"
+              >Round</button>
+            </div>
+          )}
           <div className="overlay-buttons">
             <button
               className={`action-btn${showAngles ? ' active' : ''}`}
@@ -1814,7 +1987,7 @@ function App() {
                   }
                   const newPaths = [...paths, { name: getPathName(activePath) + ' copy', indices: newPathIndices }];
                   const newIdx = newPaths.length - 1;
-                  pushState({ points: newPoints, paths: newPaths });
+                  pushState({ points: newPoints, paths: newPaths }, 'Duplicated path');
                   setActivePath(newIdx);
                   setSelectedIndex(null);
                   setDupNewPathIdx(newIdx);
@@ -1887,7 +2060,7 @@ function App() {
                       if (isNaN(val)) return;
                       const newPoints = [...points];
                       newPoints[gi] = [val, p[1]];
-                      pushState({ points: newPoints, paths });
+                      pushState({ points: newPoints, paths }, 'Coord edited');
                     }}
                   />
                   <input
@@ -1901,7 +2074,7 @@ function App() {
                       if (isNaN(val)) return;
                       const newPoints = [...points];
                       newPoints[gi] = [p[0], val];
-                      pushState({ points: newPoints, paths });
+                      pushState({ points: newPoints, paths }, 'Coord edited');
                     }}
                   />
                   <button className="inline-btn" disabled={isView || posInPath === 0}
@@ -1951,7 +2124,7 @@ function App() {
                 onClick={() => {
                   const parsed = parseOpenSCAD(importText);
                   if (parsed) {
-                    pushState(parsed);
+                    pushState(parsed, 'Imported');
                     setActivePath(0);
                     setSelectedIndex(null);
                     setImportText('');
@@ -1980,7 +2153,7 @@ function App() {
                   onClick={() => !isView && jumpTo(ri)}
                 >
                   <span className="history-index">{ri + 1}</span>
-                  <span className="history-summary">{e.paths.length === 1 ? `${e.points.length} pts` : `${e.paths.length} paths, ${e.points.length} pts`}</span>
+                  <span className="history-summary">{e.label || (ri === 0 ? 'Initial' : `${e.points.length} pts`)}</span>
                 </div>
                 );
               })}

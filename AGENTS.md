@@ -43,7 +43,7 @@ npm run preview    # serve production build
 
 ## Editing Modes
 
-The editor has a mode toolbar with eight modes:
+The editor has a mode toolbar with eleven modes:
 
 - **Edit** (normal) — click edge midpoints to insert points, shift+drag to move points
 - **Distance** — select a point then an edge; set the perpendicular distance from the point to the infinite line defined by the edge. Point moves along the perpendicular, no grid snapping.
@@ -53,6 +53,9 @@ The editor has a mode toolbar with eight modes:
 - **Length** — select an edge; set its length. The second endpoint moves along the edge direction to match the new length.
 - **Parallel** — select a base edge (reference) then a target edge; click "Make Parallel" to rotate the target edge around its midpoint to match the base edge's angle (preserving length, choosing the closer of the two parallel directions).
 - **Duplicate** — click to duplicate the active path (creates a copy with new points), then drag to place the copy. The new path gets the original's name + " copy".
+- **Rotate** — click to set pivot (snaps to existing point if near, otherwise arbitrary), then drag to rotate active path around pivot. Mouse-up commits.
+- **Rotate All** — same as Rotate but rotates all points in all paths around the pivot.
+- **Simplify** — read-only mode (no point insertion or movement). Provides "Reorder Points" button to renumber points sequentially per path, and a "Round" button with configurable decimal places to reduce coordinate precision.
 
 ## Conventions
 
