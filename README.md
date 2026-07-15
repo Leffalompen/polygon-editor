@@ -1,6 +1,6 @@
-# OpenSCAD Polygon Editor
+# Polygon Editor
 
-A browser-based visual editor for creating 2D polygons with hole support, designed for use with OpenSCAD. Build shapes by clicking, adjust with precision tools, then copy the `polygon()` output directly into your `.scad` files.
+A browser-based visual editor for creating 2D polygons with hole support. Build shapes by clicking, adjust with precision tools, then export to **OpenSCAD** (`polygon()`) or **build123d** (Python `Polygon`) for your 3D workflow.
 
 ### web page available
 https://leffalompen.github.io/polygon-editor/
@@ -157,6 +157,15 @@ The sidebar shows all points in the active path:
 - Reorder points within the path using the ^ and v buttons
 - Remove a point with the x button (minimum 3 points per path)
 
+## Export Format
+
+A dropdown in the page header toggles the target library:
+
+- **OpenSCAD** — outputs a `polygon(points=..., paths=...)` call
+- **build123d** — outputs a reordered `profile_pts = [ (x, y), ... ]` point list per path
+
+The output panel, its heading, and the import button all follow the selected format. The choice is remembered across reloads.
+
 ## OpenSCAD Output
 
 The output panel shows the `polygon()` call ready to paste into OpenSCAD:
@@ -176,10 +185,37 @@ polygon(points=[[0,17],[87,10],[39,23],[70,23],[91,14],[0,23],[91,0],[93,7],[82,
 - Convexity is auto-calculated and included when greater than 1
 - Click "Copy to Clipboard" to copy the output
 
+## build123d Output reordered
+
+```python
+profile_pts = [
+    (0, 17),
+    (71, 17),
+    (80, 14),
+    (87, 10),
+    (89, 5),
+    (89, 0),
+    (91, 0),
+    (93, 7),
+    (91, 14),
+    (82, 19),
+    (70, 23),
+    (39, 23),
+    (0, 23),
+]
+```
+
+- Each path becomes a plain point list of `(x, y)` tuples, emitted in path (reordered) order
+- `paths[0]` is `profile_pts`; each hole is a `hole_N_pts` list
+- Coordinates are exactly as drawn; convexity is OpenSCAD-specific and hidden here
+
 ## Importing
 
-### Import from OpenSCAD
-Click "Import from OpenSCAD" below the output, paste a `polygon(points=..., paths=...)` string, and click Load. Supports both single-path and multi-path polygons.
+### Import from code
+The import button matches the selected export format; only the matching one is shown.
+
+- **Import from OpenSCAD** — paste a `polygon(points=..., paths=...)` string; supports single-path and multi-path polygons
+- **Import from build123d** — paste build123d `Polygon(...)` calls or a plain `profile_pts = [ (x, y), ... ]` point list; `mode=Mode.SUBTRACT` calls (or variables named `hole...`) load as holes, the rest as the outer shape
 
 ### Background Image
 Click "Import Image" to load a PNG or JPEG as a tracing reference. Adjust opacity with the slider. The image is positioned with its bottom-left corner at the origin.
@@ -208,3 +244,4 @@ npm run preview    # serve the production build
 - Single component (`App.tsx`), no routing, no state library
 - Canvas API for rendering
 - localStorage for persistence
+- Export to OpenSCAD `polygon()` or a build123d reordered point list

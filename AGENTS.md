@@ -57,9 +57,17 @@ The editor has a mode toolbar with eleven modes:
 - **Rotate All** — same as Rotate but rotates all points in all paths around the pivot.
 - **Simplify** — read-only mode (no point insertion or movement). Provides "Reorder Points" button to renumber points sequentially per path, and a "Round" button with configurable decimal places to reduce coordinate precision.
 
+## Export Format
+
+A header dropdown (`exportFormat` state, persisted under `polygon-editor-format`) toggles between OpenSCAD and build123d. The output panel heading, output text, and import button/parser all follow it.
+
+- **OpenSCAD** — `polygon(points=..., paths=...)`, convexity label shown
+- **build123d** — a plain reordered point list per path: `profile_pts = [ (x, y), ... ]` for `paths[0]`, `hole_N_pts = [...]` for each hole. Points are emitted in path (indices) order; convexity is hidden. Output heading reads "build123d Output reordered".
+- Import: `parseOpenSCAD` or `parseBuild123d` per format; only the matching import button is shown. `parseBuild123d` reads both `Polygon(...)` calls and bare `name = [ (x, y), ... ]` lists (a `hole`-named variable or `mode=Mode.SUBTRACT` marks a hole).
+
 ## Conventions
 
-- Output format must match OpenSCAD `polygon()` syntax exactly
+- OpenSCAD output format must match `polygon()` syntax exactly
 - Single path: `polygon(points=[...]);`
 - Multiple paths: `polygon(points=[...], paths=[[...],[...]], convexity=N);`
 - Canvas grid snaps to 1-unit increments, major grid lines every 10 units

@@ -26,6 +26,10 @@ const EDGE_HIT_RADIUS = 8;
 
 type EditMode = 'normal' | 'distance' | 'move' | 'moveAll' | 'angle' | 'length' | 'parallel' | 'duplicate' | 'view' | 'rotate' | 'rotateAll' | 'simplify';
 
+/** Target library for the exported code / import parser. */
+type ExportFormat = 'openscad' | 'build123d';
+const FORMAT_KEY = 'polygon-editor-format';
+
 /** Signed distance from point P to the infinite line through A→B.
  *  Positive = left side of A→B, negative = right side. */
 function signedDistToLine(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
@@ -225,6 +229,71 @@ function parseOpenSCAD(text: string): PolyState | null {
   }
 }
 
+/** Parse build123d builder-mode code: each `Polygon(...)` becomes a path.
+ *  A Polygon carrying `Mode.SUBTRACT` is treated as a hole; the ADD polygon is the outer shape. */
+function parseBuild123d(text: string): PolyState | null {
+  try {
+    const polygons: { pts: Point[]; subtract: boolean }[] = [];
+    const re = /Polygon\s*\(/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      // Walk forward to the matching close paren (tuples add nesting)
+      let depth = 1;
+      let i = m.index + m[0].length;
+      const bodyStart = i;
+      for (; i < text.length && depth > 0; i++) {
+        if (text[i] === '(') depth++;
+        else if (text[i] === ')') depth--;
+      }
+      if (depth !== 0) continue;
+      const body = text.slice(bodyStart, i - 1);
+      const subtract = /Mode\s*\.\s*SUBTRACT/.test(body);
+      const pts: Point[] = [];
+      const tupleRe = /\(\s*(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)(?:\s*,\s*-?\d*\.?\d+)?\s*\)/g;
+      let t: RegExpExecArray | null;
+      while ((t = tupleRe.exec(body)) !== null) {
+        pts.push([parseFloat(t[1]), parseFloat(t[2])]);
+      }
+      if (pts.length >= 3) polygons.push({ pts, subtract });
+    }
+    // Fallback: plain point-list assignments (e.g. `profile_pts = [ (x, y), ... ]`)
+    if (polygons.length === 0) {
+      const listRe = /(\w+)\s*=\s*\[/g;
+      let lm: RegExpExecArray | null;
+      while ((lm = listRe.exec(text)) !== null) {
+        let depth = 1;
+        let i = lm.index + lm[0].length;
+        const bodyStart = i;
+        for (; i < text.length && depth > 0; i++) {
+          if (text[i] === '[') depth++;
+          else if (text[i] === ']') depth--;
+        }
+        if (depth !== 0) continue;
+        const body = text.slice(bodyStart, i - 1);
+        const subtract = /hole/i.test(lm[1]);
+        const pts: Point[] = [];
+        const tupleRe = /\(\s*(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)(?:\s*,\s*-?\d*\.?\d+)?\s*\)/g;
+        let t: RegExpExecArray | null;
+        while ((t = tupleRe.exec(body)) !== null) {
+          pts.push([parseFloat(t[1]), parseFloat(t[2])]);
+        }
+        if (pts.length >= 3) polygons.push({ pts, subtract });
+      }
+    }
+    if (polygons.length === 0) return null;
+    // Outer (ADD) paths first, then holes (SUBTRACT)
+    polygons.sort((a, b) => Number(a.subtract) - Number(b.subtract));
+    const points: Point[] = [];
+    const paths: PathDef[] = polygons.map((poly, pi) => ({
+      name: pi === 0 ? 'Outer' : `Hole ${pi}`,
+      indices: poly.pts.map((p) => { points.push(p); return points.length - 1; }),
+    }));
+    return { points, paths };
+  } catch {
+    return null;
+  }
+}
+
 function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
   const dx = bx - ax;
   const dy = by - ay;
@@ -349,6 +418,10 @@ function App() {
   const [polyOpacity, setPolyOpacity] = useState(0.35);
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState('');
+  const [exportFormat, setExportFormat] = useState<ExportFormat>(
+    () => (localStorage.getItem(FORMAT_KEY) === 'build123d' ? 'build123d' : 'openscad'),
+  );
+  useEffect(() => { localStorage.setItem(FORMAT_KEY, exportFormat); }, [exportFormat]);
   const [showAngles, setShowAngles] = useState(false);
   const [showLengths, setShowLengths] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1591,6 +1664,22 @@ function App() {
     setSelectedIndex(null);
   };
 
+  // Renumber points to match path traversal order (path 0 first, then each hole).
+  const reorderPoints = () => {
+    const newPoints: Point[] = [];
+    const newPaths: PathDef[] = [];
+    for (const path of paths) {
+      const startIdx = newPoints.length;
+      const newIndices: number[] = [];
+      for (const idx of path.indices) {
+        newPoints.push(points[idx]);
+        newIndices.push(startIdx + newIndices.length);
+      }
+      newPaths.push({ name: path.name, indices: newIndices });
+    }
+    pushState({ points: newPoints, paths: newPaths }, 'Reordered points');
+  };
+
 
   // --- Output ---
   const [convexity, setConvexity] = useState(() => paths[0]?.indices.length >= 3 ? calcConvexity(state) : 1);
@@ -1623,13 +1712,41 @@ function App() {
     return `polygon(points=${ptsStr}, paths=${pathsStr});`;
   })();
 
+  const build123dOutput = (() => {
+    // Emit each path as a plain point list, in path (reordered) order.
+    const blocks = paths.map((pathDef, pi) => {
+      const varName = pi === 0 ? 'profile_pts' : `hole_${pi}_pts`;
+      const rows = pathDef.indices
+        .map((gi) => `    (${points[gi][0]}, ${points[gi][1]}),`)
+        .join('\n');
+      return `${varName} = [\n${rows}\n]`;
+    });
+    return blocks.join('\n\n');
+  })();
+
+  const isBuild123d = exportFormat === 'build123d';
+  const currentOutput = isBuild123d ? build123dOutput : openscadOutput;
+  const formatLabel = isBuild123d ? 'build123d' : 'OpenSCAD';
+  const outputHeading = isBuild123d ? 'build123d Output reordered' : 'OpenSCAD Output';
+
   // Active path's points for the sidebar list
   const activeIndices = paths[activePath]?.indices || [];
   const isView = editMode === 'view';
 
   return (
     <div className="app">
-      <h1>OpenSCAD Polygon Editor</h1>
+      <h1>
+        <select
+          className="format-select"
+          value={exportFormat}
+          onChange={(e) => setExportFormat(e.target.value as ExportFormat)}
+          title="Export / import format"
+        >
+          <option value="openscad">OpenSCAD</option>
+          <option value="build123d">build123d</option>
+        </select>
+        {' '}Polygon Editor
+      </h1>
       <div className="main-layout">
         <div className="canvas-container" ref={containerRef}>
           <canvas
@@ -1776,20 +1893,7 @@ function App() {
             <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
               <button
                 className="action-btn"
-                onClick={() => {
-                  const newPoints: Point[] = [];
-                  const newPaths: PathDef[] = [];
-                  for (const path of paths) {
-                    const startIdx = newPoints.length;
-                    const newIndices: number[] = [];
-                    for (const idx of path.indices) {
-                      newPoints.push(points[idx]);
-                      newIndices.push(startIdx + newIndices.length);
-                    }
-                    newPaths.push({ name: path.name, indices: newIndices });
-                  }
-                  pushState({ points: newPoints, paths: newPaths }, 'Reordered points');
-                }}
+                onClick={reorderPoints}
                 title="Reorder points to match path traversal order"
               >Reorder Points</button>
               <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px' }}>
@@ -2038,6 +2142,13 @@ function App() {
             <button className="add-hole-btn" disabled={isView} onClick={addHole}>+ Add Hole</button>
           </div>
 
+          <button
+            className="action-btn full-width"
+            disabled={isView}
+            onClick={reorderPoints}
+            title="Reorder points to match path traversal order"
+          >Reorder Points</button>
+
           <h2>Points — {getPathName(activePath)} ({activeIndices.length})</h2>
           <div className="point-list">
             {activeIndices.map((gi, posInPath) => {
@@ -2087,48 +2198,52 @@ function App() {
               );
             })}
           </div>
-          <div className="convexity-label">
-            Convexity: <span className={convexity <= 1 ? 'convex' : 'concave'}>{convexity}</span>
-            {convexity <= 1 ? ' (convex)' : ' (concave)'}
-            <button className="inline-btn" style={{ marginLeft: 'auto', fontSize: 14, padding: '2px 6px', lineHeight: 1 }} onClick={recalcConvexity} title="Recalculate convexity">↻</button>
-          </div>
-          <h2>OpenSCAD Output</h2>
+          {!isBuild123d && (
+            <div className="convexity-label">
+              Convexity: <span className={convexity <= 1 ? 'convex' : 'concave'}>{convexity}</span>
+              {convexity <= 1 ? ' (convex)' : ' (concave)'}
+              <button className="inline-btn" style={{ marginLeft: 'auto', fontSize: 14, padding: '2px 6px', lineHeight: 1 }} onClick={recalcConvexity} title="Recalculate convexity">↻</button>
+            </div>
+          )}
+          <h2>{outputHeading}</h2>
           <textarea
             className="output-area"
             readOnly
-            value={openscadOutput}
+            value={currentOutput}
             onClick={(e) => (e.target as HTMLTextAreaElement).select()}
           />
           <button
             className="action-btn full-width"
             onClick={() => {
-              navigator.clipboard.writeText(openscadOutput).then(() => {
+              navigator.clipboard.writeText(currentOutput).then(() => {
                 const btn = document.querySelector('.action-btn.full-width') as HTMLButtonElement;
                 if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy to Clipboard'; }, 1500); }
               });
             }}
           >Copy to Clipboard</button>
           <button className="action-btn full-width" disabled={isView} onClick={() => setShowImport(!showImport)}>
-            {showImport ? '▾ Hide Import' : '▸ Import from OpenSCAD'}
+            {showImport ? '▾ Hide Import' : `▸ Import from ${formatLabel}`}
           </button>
           {showImport && (
             <div className="import-panel">
               <textarea
                 className="import-textarea"
-                placeholder="Paste polygon(points=..., paths=...) here"
+                placeholder={isBuild123d ? 'Paste build123d Polygon(...) calls or a profile_pts = [ (x, y), ... ] list here' : 'Paste polygon(points=..., paths=...) here'}
                 value={importText}
                 onChange={(e) => setImportText(e.target.value)}
               />
               <button
                 className="action-btn"
                 onClick={() => {
-                  const parsed = parseOpenSCAD(importText);
+                  const parsed = isBuild123d ? parseBuild123d(importText) : parseOpenSCAD(importText);
                   if (parsed) {
                     pushState(parsed, 'Imported');
                     setActivePath(0);
                     setSelectedIndex(null);
                     setImportText('');
                     setShowImport(false);
+                  } else if (isBuild123d) {
+                    alert('Could not parse build123d code. Expected Polygon((x, y), ...) calls or a point list like profile_pts = [ (x, y), ... ] (holes use mode=Mode.SUBTRACT or a "hole" variable name).');
                   } else {
                     alert('Could not parse OpenSCAD polygon. Expected: polygon(points=[[x,y],...], paths=[[0,1,2],...])');
                   }
